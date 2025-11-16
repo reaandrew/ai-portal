@@ -226,6 +226,22 @@ chmod 644 ~/.ssh/ai-portal-key.pub
 
 ### 3. Configure Variables
 
+**Option 1: Retrieve from AWS SSM Parameter Store (Recommended)**
+
+The terraform.tfvars file is stored securely in AWS Systems Manager Parameter Store:
+
+```bash
+# Retrieve from SSM Parameter Store
+aws-vault exec personal -- aws ssm get-parameter \
+  --name "/com/forora/ai-portal/terraform.tfvars" \
+  --with-decryption \
+  --region eu-west-2 \
+  --query 'Parameter.Value' \
+  --output text > terraform.tfvars
+```
+
+**Option 2: Create from scratch**
+
 ```bash
 # Copy example file
 cp terraform.tfvars.example terraform.tfvars

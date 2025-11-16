@@ -6,8 +6,8 @@ Use this checklist before tearing down to ensure you can rebuild:
 
 ### 📁 Files to Preserve
 
-- [ ] `terraform.tfvars` - **CRITICAL** Contains passwords and configuration
-- [ ] `terraform.tfstate` - **CRITICAL** State tracking (if not using remote backend)
+- [ ] `terraform.tfvars` - **STORED IN AWS SSM**: `/com/forora/ai-portal/terraform.tfvars`
+- [ ] `terraform.tfstate` - **STORED IN S3**: `ai-portal-terraform-state-276447169330`
 - [ ] `main.tf` - Infrastructure definition
 - [ ] `variables.tf` - Variable definitions
 - [ ] `outputs.tf` - Output definitions
