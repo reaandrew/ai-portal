@@ -1,0 +1,42 @@
+# AWS Configuration
+aws_region  = "eu-west-2"
+project_name = "ai-portal"
+environment = "dev"
+
+# Network Configuration
+vpc_cidr = "10.0.0.0/16"
+
+# Restrict access to your IP address for security
+# Replace 0.0.0.0/0 with your IP address (e.g., "1.2.3.4/32")
+allowed_cidr_blocks = ["0.0.0.0/0"]
+
+# SSH Key Configuration
+# key_name: The name AWS will use for this key pair (e.g., "my-laptop-key")
+key_name = "ai-portal-key"
+
+# ssh_public_key: Paste the CONTENT of your public key file here
+# Get it by running: cat ~/.ssh/id_rsa.pub (or ~/.ssh/id_ed25519.pub)
+# Should look like: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... user@hostname"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@hostname"
+
+# Instance Types (adjust based on workload)
+webui_instance_type    = "t3.large"    # Open WebUI instance
+gateway_instance_type  = "t3.large"    # Bedrock Gateway instance
+rds_instance_class     = "db.t3.medium" # PostgreSQL database
+
+# Database Configuration
+db_name     = "aiportal"
+db_username = "aiportaladmin"
+db_password = "CHANGE_ME_SecurePassword123!"  # CHANGE THIS!
+
+# Active Directory Configuration
+ad_domain_name    = "corp.aiportal.local"
+ad_admin_password = "CHANGE_ME_SecureADPassword123!" # CHANGE THIS!
+# Must meet complexity requirements:
+# - At least 8 characters
+# - Contains uppercase, lowercase, numbers, and special characters
+# - Does not contain username or domain name
+
+# Domain Configuration
+domain_name = "forora.com"  # Your Route53 hosted zone domain
+subdomain   = "ai"          # Subdomain for the AI Portal (will create ai.forora.com)
