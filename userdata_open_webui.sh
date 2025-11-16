@@ -30,13 +30,13 @@ OLLAMA_BASE_URL=http://${bedrock_gateway}:8000
 ENABLE_SIGNUP=false
 ENABLE_OAUTH=false
 DEFAULT_USER_ROLE=user
-ENABLE_PERSISTENT_CONFIG=false
+ENABLE_PERSISTENT_CONFIG=true
 ENABLE_LDAP=true
 LDAP_SERVER_LABEL=Active Directory
 LDAP_SERVER_HOST=$(echo "${ad_dns_ips}" | cut -d',' -f1)
 LDAP_SERVER_PORT=389
 LDAP_USE_TLS=false
-LDAP_APP_DN=CN=Admin,OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local
+LDAP_APP_DN=CN=Admin,CN=Users,DC=corp,DC=aiportal,DC=local
 LDAP_APP_PASSWORD=${ad_admin_password}
 LDAP_SEARCH_BASE=DC=corp,DC=aiportal,DC=local
 LDAP_SEARCH_FILTER=(&(objectClass=user)(objectCategory=person)(sAMAccountName={username}))
