@@ -23,23 +23,26 @@ mkdir -p /opt/open-webui
 cd /opt/open-webui
 
 # Create environment file
+# NOTE: Open WebUI v0.6.36 has bugs:
+# 1. DATABASE_URL with PostgreSQL causes crashes - use SQLite
+# 2. {username} placeholder in LDAP_SEARCH_FILTER broken - omit it
+# 3. ENABLE_PERSISTENT_CONFIG unreliable - use environment variables
 cat > .env <<EOF
-DATABASE_URL=postgresql://${db_user}:${db_password}@${db_host}:5432/${db_name}
 WEBUI_SECRET_KEY=$(openssl rand -hex 32)
 OLLAMA_BASE_URL=http://${bedrock_gateway}:8000
-ENABLE_SIGNUP=false
+ENABLE_SIGNUP=true
 ENABLE_OAUTH=false
 DEFAULT_USER_ROLE=user
-ENABLE_PERSISTENT_CONFIG=true
+ENABLE_PERSISTENT_CONFIG=false
 ENABLE_LDAP=true
 LDAP_SERVER_LABEL=Active Directory
 LDAP_SERVER_HOST=$(echo "${ad_dns_ips}" | cut -d',' -f1)
 LDAP_SERVER_PORT=389
 LDAP_USE_TLS=false
-LDAP_APP_DN=CN=Admin,CN=Users,DC=corp,DC=aiportal,DC=local
+LDAP_APP_DN=Admin@corp.aiportal.local
 LDAP_APP_PASSWORD=${ad_admin_password}
-LDAP_SEARCH_BASE=DC=corp,DC=aiportal,DC=local
-LDAP_SEARCH_FILTER=(&(objectClass=user)(objectCategory=person)(sAMAccountName={username}))
+LDAP_SEARCH_BASE=OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local
+LDAP_SEARCH_FILTER=(&(objectClass=user)(objectCategory=person))
 LDAP_ATTRIBUTE_FOR_USERNAME=sAMAccountName
 LDAP_ATTRIBUTE_FOR_MAIL=mail
 ENABLE_COMMUNITY_SHARING=false
