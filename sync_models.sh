@@ -5,6 +5,7 @@
 set -e
 
 WEBUI_IP=${1:-$(terraform output -raw open_webui_public_ip 2>/dev/null)}
+GATEWAY_IP=$(terraform output -raw bedrock_gateway_private_ip 2>/dev/null || echo "10.0.0.73")
 
 if [ -z "$WEBUI_IP" ]; then
     echo "Usage: $0 [open_webui_ip]"
@@ -14,7 +15,7 @@ fi
 
 echo "Syncing models from Bedrock Gateway to Open WebUI at $WEBUI_IP..."
 
-ssh -o StrictHostKeyChecking=no ec2-user@$WEBUI_IP "sudo docker exec -i open-webui python3 <<'PYTHON_EOF'
+ssh -o StrictHostKeyChecking=no ec2-user@$WEBUI_IP "sudo docker exec -i open-webui python3 <<PYTHON_EOF
 import os
 import requests
 import json
@@ -26,7 +27,7 @@ from sqlalchemy import text
 
 # Get models from Bedrock Gateway
 print('Fetching models from Bedrock Gateway...')
-response = requests.get('http://10.0.0.28:8000/api/tags', timeout=10)
+response = requests.get('http://$GATEWAY_IP:8000/api/tags', timeout=10)
 response.raise_for_status()
 models_data = response.json()['models']
 print(f'✅ Found {len(models_data)} models')
@@ -62,7 +63,7 @@ with engine.connect() as conn:
     result = conn.execute(text('SELECT COUNT(*) FROM model WHERE is_active = 1'))
     count = result.fetchone()[0]
     print(f'✅ Successfully synced {count} models')
-    print('\nModels are now visible in Open WebUI!')
+    print('\\nModels are now visible in Open WebUI!')
 PYTHON_EOF
 "
 

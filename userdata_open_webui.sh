@@ -212,3 +212,47 @@ else
     echo "⚠️  Bedrock Gateway not reachable - models not synced"
     echo "Run ./sync_models.sh manually after deployment"
 fi
+
+# ========================================
+# CRITICAL: Create Initial Admin Account
+# ========================================
+# Required to show LDAP login option in UI (README line 14, 386-398)
+echo "Creating initial admin account..."
+sleep 5  # Wait for Open WebUI to be fully ready
+
+curl -X POST http://localhost:8080/api/v1/auths/signup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Admin",
+    "email": "admin@aiportal.local",
+    "password": "AdminPassword123"
+  }' || echo "⚠️  Failed to create admin account - may already exist"
+
+# ========================================
+# Enable DS Data Access & Create Test User
+# ========================================
+echo "Enabling Directory Data Access..."
+aws ds enable-directory-data-access \
+  --directory-id "${ad_directory_id}" \
+  --region ${aws_region} 2>/dev/null || echo "DS Data Access already enabled"
+
+echo "Waiting 30 seconds for DS Data Access to be ready..."
+sleep 30
+
+echo "Creating testuser in Active Directory..."
+aws ds-data create-user \
+  --directory-id "${ad_directory_id}" \
+  --sam-account-name testuser \
+  --given-name "Test" \
+  --surname "User" \
+  --email-address "testuser@corp.aiportal.local" \
+  --region ${aws_region} || echo "⚠️  testuser may already exist"
+
+echo "Setting testuser password..."
+aws ds reset-user-password \
+  --directory-id "${ad_directory_id}" \
+  --user-name testuser \
+  --new-password "Welcome@2024" \
+  --region ${aws_region} || echo "⚠️  Failed to set password"
+
+echo "✅ LDAP setup complete! You can now login with testuser / Welcome@2024"
