@@ -84,17 +84,23 @@ def get_available_models():
             if any(pattern in model_id_lower for pattern in EXCLUDED_MODEL_PATTERNS):
                 continue
 
-            # Skip cross-region inference models (only cross-region, not on-demand)
+            # Only include pure ON_DEMAND models
+            # Exclude if has CROSS_REGION or INFERENCE_PROFILE
             inference_types = model.get('inferenceTypesSupported', [])
-            if 'CROSS_REGION' in inference_types and 'ON_DEMAND' not in inference_types:
+            if 'CROSS_REGION' in inference_types:
+                continue
+            if 'INFERENCE_PROFILE' in inference_types:
+                continue
+            if 'ON_DEMAND' not in inference_types:
                 continue
 
             # Only include text generation models
             modalities = model.get('outputModalities', [])
             if 'TEXT' in modalities:
+                model_id = model['modelId']
                 models.append({
-                    "name": model['modelId'],
-                    "model": model['modelId'],
+                    "name": model_id,
+                    "model": model_id,
                     "modified_at": datetime.now().isoformat() + "Z",
                     "size": 0,
                     "digest": model['modelName']
@@ -104,25 +110,19 @@ def get_available_models():
         _cache_time = datetime.now()
         return models
     except Exception as e:
-        # Fallback to common models if API fails
+        # Fallback to common ON_DEMAND model if API fails
         print(f"Error fetching models: {e}")
+        fallback_model = "anthropic.claude-3-7-sonnet-20250219-v1:0"
         return [
             {
-                "name": "anthropic.claude-sonnet-4-5-20250929-v1:0",
-                "model": "anthropic.claude-sonnet-4-5-20250929-v1:0",
-                "modified_at": "2025-09-29T00:00:00Z",
+                "name": fallback_model,
+                "model": fallback_model,
+                "modified_at": "2025-02-19T00:00:00Z",
                 "size": 0,
-                "digest": "claude-sonnet-4-5"
+                "digest": "claude-3-7-sonnet"
             }
         ]
 
-def get_model_id_or_profile(model_id: str) -> str:
-    """Convert model ID to inference profile if needed for newer models"""
-    # Newer Claude 4.5 and 3.7 models require inference profiles
-    if any(x in model_id for x in ['claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-3-7-sonnet']):
-        if not model_id.startswith('global.'):
-            return f'global.{model_id}'
-    return model_id
 
 @app.get("/health")
 async def health_check():
@@ -148,9 +148,9 @@ async def generate(request: Request):
 
         print(f"Generate request for model: {model_id}")
 
-        # Use Bedrock Converse API (works with all models)
+        # Use Bedrock Converse API (works with all ON_DEMAND models)
         response = bedrock_runtime.converse(
-            modelId=get_model_id_or_profile(model_id),
+            modelId=model_id,
             messages=[
                 {
                     "role": "user",
@@ -202,9 +202,9 @@ async def chat(request: Request):
                 "content": [{"text": msg.get("content", "")}]
             })
 
-        # Use Bedrock Converse API (works with all models)
+        # Use Bedrock Converse API (works with all ON_DEMAND models)
         response = bedrock_runtime.converse(
-            modelId=get_model_id_or_profile(model_id),
+            modelId=model_id,
             messages=converse_messages,
             inferenceConfig={
                 "maxTokens": data.get("max_tokens", 2048),
