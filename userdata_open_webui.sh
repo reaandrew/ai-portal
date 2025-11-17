@@ -133,7 +133,8 @@ if curl -sf http://$GATEWAY_IP:8000/health > /dev/null 2>&1; then
     sleep 10
 
     # Sync models from Bedrock Gateway
-    docker exec -i open-webui python3 <<'PYTHON_EOF'
+    echo "Starting model sync process..."
+    if docker exec -i open-webui python3 <<'PYTHON_EOF'
 import os
 import requests
 import json
@@ -148,12 +149,16 @@ for i in range(max_retries):
     try:
         from open_webui.internal.db import engine
         from sqlalchemy import text
+        print(f'Database ready after {i} retries')
         break
     except Exception as e:
         if i < max_retries - 1:
+            print(f'Waiting for database... ({i+1}/{max_retries})')
             time.sleep(2)
         else:
-            raise
+            print(f'ERROR: Database not ready after {max_retries} retries: {e}')
+            import sys
+            sys.exit(1)
 
 # Get models from Bedrock Gateway
 print('Fetching models from Bedrock Gateway...')
@@ -192,9 +197,17 @@ with engine.connect() as conn:
     result = conn.execute(text('SELECT COUNT(*) FROM model WHERE is_active = 1'))
     count = result.fetchone()[0]
     print(f'Successfully synced {count} models to Open WebUI!')
-PYTHON_EOF
 
-    echo "✅ Model sync complete! Open WebUI is ready to use."
+# Exit with success
+import sys
+sys.exit(0)
+PYTHON_EOF
+    then
+        echo "✅ Model sync complete! Open WebUI is ready to use."
+    else
+        echo "❌ Model sync failed - check logs above for details"
+        echo "You can run ./sync_models.sh manually after deployment"
+    fi
 else
     echo "⚠️  Bedrock Gateway not reachable - models not synced"
     echo "Run ./sync_models.sh manually after deployment"
