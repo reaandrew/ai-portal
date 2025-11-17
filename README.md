@@ -175,27 +175,25 @@ terraform output ai_portal_url
 
 Login with: `testuser@corp.aiportal.local` / `Welcome@2024`
 
-### 6. Sync Models from Bedrock Gateway
+### 6. Models Are Synced Automatically! ✅
 
-**REQUIRED:** Populate the model table so models appear in the UI.
+The userdata script now **automatically syncs models** during deployment:
+- Waits for Bedrock Gateway to be ready (max 5 minutes)
+- Syncs all 23 models to Open WebUI's database
+- Sets proper permissions (available to all users)
 
+**No manual action required!** Models will be ready when you login.
+
+**If models don't appear** (rare), run manually:
 ```bash
 ./sync_models.sh
 # OR: ./sync_models.sh $(terraform output -raw open_webui_public_ip)
 ```
 
-This syncs all available Bedrock models from the gateway to Open WebUI's database. Without this step, no models will be visible in the UI.
-
-**What it does:**
-- Queries Bedrock Gateway at http://10.0.0.28:8000/api/tags
-- Populates Open WebUI's `model` table with all available models
+**What gets synced:**
+- 23 Bedrock models (Claude, Nova, Llama, Mistral, Qwen, etc.)
+- Excludes: DeepSeek, embed, image, and cross-region-only models
 - Sets `is_active=1` and `access_control=NULL` (available to all users)
-- Filters: Excludes DeepSeek, embed, image, and cross-region-only models (filtering done in gateway)
-
-**When to run:**
-- After first deployment
-- After any changes to Bedrock model access
-- If models disappear from the UI
 
 ---
 
