@@ -99,3 +99,15 @@ variable "subdomain" {
   type        = string
   default     = "ai"
 }
+
+variable "keycloak_subdomain" {
+  description = "Subdomain for Keycloak"
+  type        = string
+  default     = "auth"
+}
+
+variable "keycloak_instance_type" {
+  description = "Instance type for Keycloak EC2"
+  type        = string
+  default     = "t3.small"
+}

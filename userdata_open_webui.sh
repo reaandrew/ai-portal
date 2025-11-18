@@ -22,29 +22,36 @@ yum install -y postgresql15
 mkdir -p /opt/open-webui
 cd /opt/open-webui
 
-# Create environment file
-# NOTE: Open WebUI v0.6.36 has bugs:
-# 1. DATABASE_URL with PostgreSQL causes crashes - use SQLite
-# 2. {username} placeholder in LDAP_SEARCH_FILTER broken - omit it
-# 3. ENABLE_PERSISTENT_CONFIG unreliable - use environment variables
+# Wait for Keycloak to be ready before configuring OIDC
+echo "Waiting for Keycloak to be ready..."
+KEYCLOAK_URL="https://auth.forora.com"
+MAX_WAIT=600  # 10 minutes (Keycloak takes time to boot)
+ELAPSED=0
+
+while ! curl -sf "$KEYCLOAK_URL/health/ready" > /dev/null 2>&1; do
+    if [ $ELAPSED -ge $MAX_WAIT ]; then
+        echo "WARNING: Keycloak not ready after $MAX_WAIT seconds, configuring anyway..."
+        break
+    fi
+    sleep 10
+    ELAPSED=$((ELAPSED + 10))
+    echo "Waiting for Keycloak... ($ELAPSED/$MAX_WAIT seconds)"
+done
+
+# Create environment file with OIDC configuration
 cat > .env <<EOF
 WEBUI_SECRET_KEY=$(openssl rand -hex 32)
 OLLAMA_BASE_URL=http://${bedrock_gateway}:8000
-ENABLE_SIGNUP=true
-ENABLE_OAUTH=false
+ENABLE_SIGNUP=false
+ENABLE_LOGIN_FORM=false
 DEFAULT_USER_ROLE=user
 ENABLE_PERSISTENT_CONFIG=false
-ENABLE_LDAP=true
-LDAP_SERVER_LABEL=Active Directory
-LDAP_SERVER_HOST=$(echo "${ad_dns_ips}" | cut -d',' -f1)
-LDAP_SERVER_PORT=389
-LDAP_USE_TLS=false
-LDAP_APP_DN=Admin@corp.aiportal.local
-LDAP_APP_PASSWORD=${ad_admin_password}
-LDAP_SEARCH_BASE=OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local
-LDAP_SEARCH_FILTER=(&(objectClass=user)(objectCategory=person))
-LDAP_ATTRIBUTE_FOR_USERNAME=sAMAccountName
-LDAP_ATTRIBUTE_FOR_MAIL=mail
+ENABLE_OAUTH_SIGNUP=true
+OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
+OPENID_PROVIDER_URL=https://auth.forora.com/realms/aiportal/.well-known/openid-configuration
+OAUTH_CLIENT_ID=openwebui
+OAUTH_CLIENT_SECRET=openwebui-secret-change-this
+OAUTH_SCOPES=openid email profile
 ENABLE_COMMUNITY_SHARING=false
 ENABLE_MESSAGE_RATING=false
 SAVE_CHAT_HISTORY=false
@@ -214,23 +221,9 @@ else
 fi
 
 # ========================================
-# CRITICAL: Create Initial Admin Account
-# ========================================
-# Required to show LDAP login option in UI (README line 14, 386-398)
-echo "Creating initial admin account..."
-sleep 5  # Wait for Open WebUI to be fully ready
-
-curl -X POST http://localhost:8080/api/v1/auths/signup \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Admin",
-    "email": "admin@aiportal.local",
-    "password": "AdminPassword123"
-  }' || echo "⚠️  Failed to create admin account - may already exist"
-
-# ========================================
 # Enable DS Data Access & Create Test User
 # ========================================
+# These are still needed for Keycloak LDAP federation
 echo "Enabling Directory Data Access..."
 aws ds enable-directory-data-access \
   --directory-id "${ad_directory_id}" \
@@ -255,4 +248,6 @@ aws ds reset-user-password \
   --new-password "Welcome@2024" \
   --region ${aws_region} || echo "⚠️  Failed to set password"
 
-echo "✅ LDAP setup complete! You can now login with testuser / Welcome@2024"
+echo "✅ Open WebUI setup complete!"
+echo "✅ Login via Keycloak at: https://ai.forora.com"
+echo "✅ Use testuser@corp.aiportal.local / Welcome@2024"

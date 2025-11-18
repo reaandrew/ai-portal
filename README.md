@@ -1,20 +1,20 @@
 # AI Portal - AWS Infrastructure
 
-Complete Terraform infrastructure for AI Portal on AWS with Open WebUI, AWS Bedrock integration, PostgreSQL RDS, and Active Directory authentication.
+Complete Terraform infrastructure for AI Portal on AWS with Open WebUI, AWS Bedrock integration, PostgreSQL RDS, Keycloak SSO, and Active Directory authentication.
 
-## ✅ LDAP Authentication - WORKING (v0.6.36)
+## ✅ Keycloak SSO Authentication - FULLY AUTOMATED
 
-**LDAP authentication WORKS with Open WebUI v0.6.36 when configured correctly.** After extensive debugging (2025-11-17), we identified the root cause and confirmed a working, repeatable procedure.
+**Single Sign-On (SSO) via Keycloak is fully automated and production-ready.** Users authenticate through Keycloak which federates to Active Directory via LDAP, providing enterprise-grade authentication with centralized identity management.
 
-### Key Requirements
+### Key Features
 
-1. **{username} placeholder must be removed** - Use static search filter
-2. **ENABLE_PERSISTENT_CONFIG=false** - Use environment variables
-3. **Password without special characters recommended** - Avoid `!` in `LDAP_APP_PASSWORD`
-4. **Initial admin account required** - To show LDAP login option in UI
-5. **Let LDAP create users** - Do NOT pre-create users in database manually
+1. **Keycloak as Identity Provider (IdP)** - Centralized authentication and user management
+2. **LDAP Federation to Active Directory** - Seamless integration with existing AD infrastructure
+3. **OpenID Connect (OIDC)** - Modern authentication protocol
+4. **Fully Automated Setup** - Keycloak realm, LDAP config, and OIDC client created automatically
+5. **No Local Password Storage** - All authentication handled by Keycloak + AD
 
-**The userdata script is configured correctly.** See "LDAP Setup Procedure" below for manual setup steps.
+**Authentication Flow:** `User → Open WebUI → Keycloak → Active Directory → OIDC tokens → Authenticated`
 
 ---
 
@@ -22,12 +22,13 @@ Complete Terraform infrastructure for AI Portal on AWS with Open WebUI, AWS Bedr
 
 ### ✅ REQUIRED Files (In This Directory)
 
-**These 7 files are ALL you need to deploy:**
+**These 8 files are ALL you need to deploy:**
 
 ```
 main.tf                          # Infrastructure definition
 variables.tf                     # Variable declarations
 outputs.tf                       # Output values
+userdata_keycloak.sh            # Keycloak EC2 bootstrap (referenced in main.tf)
 userdata_open_webui.sh          # Open WebUI EC2 bootstrap (referenced in main.tf)
 userdata_bedrock_gateway.sh     # Bedrock Gateway EC2 bootstrap (referenced in main.tf)
 sync_models.sh                   # Sync Bedrock models to Open WebUI (run after deploy)
@@ -54,19 +55,22 @@ terraform.tfvars.example         # Template for tfvars
 ## 🏗️ Infrastructure Overview
 
 **Components:**
-- **2x EC2 Instances (t3.large)** - Open WebUI + Bedrock Gateway
-- **RDS PostgreSQL (db.t3.medium)** - Database for Open WebUI
-- **AWS Managed Microsoft AD** - Active Directory for authentication
-- **Application Load Balancer** - TLS 1.3 termination
-- **ACM Certificate** - SSL/TLS for custom domain
+- **3x EC2 Instances** - Open WebUI (t3.large), Keycloak (t3.small), Bedrock Gateway (t3.large)
+- **RDS PostgreSQL (db.t3.medium)** - Shared database (2 databases: `aiportal`, `keycloak`)
+- **AWS Managed Microsoft AD** - Active Directory for user authentication
+- **Keycloak (Docker)** - Identity Provider with LDAP federation
+- **Application Load Balancer** - TLS 1.3 termination with host-based routing
+- **ACM Certificate** - SSL/TLS for both subdomains (ai.forora.com, auth.forora.com)
 - **VPC with public/private subnets** - Network isolation
 - **NAT Gateway** - Outbound internet for private resources
 - **Security Groups** - Network access control
 - **IAM Roles** - Bedrock API permissions
 
-**Access:** https://ai.forora.com (TLS 1.3, HTTPS only)
+**Access:**
+- **Open WebUI:** https://ai.forora.com (TLS 1.3, HTTPS only)
+- **Keycloak Admin:** https://auth.forora.com/admin
 
-**Cost:** ~£1.70/hour (~£41/day) + Bedrock token usage
+**Cost:** ~£1.90/hour (~£46/day) + Bedrock token usage
 
 ---
 
@@ -118,10 +122,12 @@ nano terraform.tfvars  # Edit with your values
 
 Required in terraform.tfvars:
 - `ssh_public_key` - Your public SSH key
-- `db_password` - Strong database password (12+ chars)
-- `ad_admin_password` - Strong AD password (8+ chars, avoid `!`)
+- `db_password` - Strong database password (12+ chars, **avoid `!`**)
+- `ad_admin_password` - Strong AD password (8+ chars, **can include `!`**)
+- `keycloak_admin_password` - Keycloak admin password (8+ chars, **avoid `!`**)
 - `domain_name` - Your Route53 domain (default: forora.com)
-- `subdomain` - Subdomain for portal (default: ai)
+- `subdomain` - Subdomain for Open WebUI (default: ai)
+- `keycloak_subdomain` - Subdomain for Keycloak (default: auth)
 
 ### 2. Deploy Infrastructure
 
@@ -138,44 +144,37 @@ terraform apply
 
 ### 3. Wait for Userdata Scripts
 
-EC2 instances run bootstrap scripts on first boot. Wait 2-3 minutes after `terraform apply` completes.
+EC2 instances run bootstrap scripts on first boot. Timeline:
+- **Keycloak**: ~2 minutes (database creation + container start + LDAP config + OIDC client)
+- **Open WebUI**: ~2 minutes (waits for Keycloak to be ready + model sync)
 
-### 4. Create AD User
+**The test user is created automatically!** The Open WebUI userdata script:
+1. Waits for Keycloak to be ready (max 10 minutes)
+2. Enables Directory Service Data Access
+3. Creates `testuser` in Active Directory
+4. Sets password to `Welcome@2024`
 
-**Option 1: Using helper script**
-```bash
-../create_ad_user.sh testuser Welcome@2024 testuser@corp.aiportal.local
-```
-
-**Option 2: Manual AWS CLI**
-```bash
-AD_DIR_ID=$(terraform output -raw active_directory_id)
-
-aws-vault exec personal -- aws ds-data create-user \
-  --directory-id "$AD_DIR_ID" \
-  --sam-account-name testuser \
-  --given-name "Test" \
-  --surname "User" \
-  --email-address "testuser@corp.aiportal.local" \
-  --region eu-west-2
-
-aws-vault exec personal -- aws ds reset-user-password \
-  --directory-id "$AD_DIR_ID" \
-  --user-name testuser \
-  --new-password "Welcome@2024" \
-  --region eu-west-2
-```
-
-### 5. Access Portal
+### 4. Access Portal & Login
 
 ```bash
 terraform output ai_portal_url
 # Output: https://ai.forora.com
 ```
 
-Login with: `testuser@corp.aiportal.local` / `Welcome@2024`
+**SSO Login Flow:**
+1. Visit https://ai.forora.com
+2. Click the **SSO** button (no username/password form shown)
+3. Redirected to Keycloak at https://auth.forora.com
+4. Enter AD credentials:
+   - Username: `testuser` (or `testuser@corp.aiportal.local`)
+   - Password: `Welcome@2024`
+5. Keycloak authenticates against Active Directory
+6. Redirected back to Open WebUI with OIDC tokens
+7. ✅ Logged in!
 
-### 6. Models Are Synced Automatically! ✅
+**No local password storage** - All authentication handled by Keycloak + AD
+
+### 5. Models Are Synced Automatically! ✅
 
 The userdata script now **automatically syncs models** during deployment:
 - Waits for Bedrock Gateway to be ready (max 5 minutes)
@@ -203,10 +202,12 @@ The userdata script now **automatically syncs models** during deployment:
 |------|----------|-------|
 | VPC & Networking | 2-3 min | VPC, subnets, IGW, NAT |
 | AWS Managed AD | 10-15 min | Slowest component |
-| RDS PostgreSQL | 5-7 min | Database creation |
-| EC2 Instances | 3-5 min | + userdata execution |
-| ALB + Certificate | 2-3 min | DNS validation |
-| **Total** | **20-30 min** | First deployment |
+| RDS PostgreSQL | 5-7 min | Database creation (2 databases) |
+| EC2 Instances | 3-5 min | 3 instances (Open WebUI, Keycloak, Gateway) |
+| ALB + Certificate | 2-3 min | DNS validation for both subdomains |
+| Keycloak Setup | ~2 min | Database + LDAP + OIDC client (via userdata) |
+| Open WebUI Setup | ~2 min | Wait for Keycloak + model sync (via userdata) |
+| **Total** | **25-35 min** | First deployment |
 
 ---
 
@@ -241,6 +242,24 @@ EOF
 "
 ```
 
+### Access Keycloak Admin Console
+
+**URL:** https://auth.forora.com/admin
+
+**Credentials:**
+- Username: `admin`
+- Password: (value of `keycloak_admin_password` from terraform.tfvars)
+
+**From Keycloak Admin, you can:**
+- Manage users and groups
+- View LDAP sync status: User Federation → active-directory → Sync users
+- Test LDAP authentication: User Federation → active-directory → Test authentication
+- View authentication logs: Realm settings → Events
+- Modify OIDC client settings: Clients → openwebui
+- Change client secret: Clients → openwebui → Credentials tab
+
+**OIDC Configuration URL:** https://auth.forora.com/realms/aiportal/.well-known/openid-configuration
+
 ### Verify Services
 
 ```bash
@@ -249,18 +268,27 @@ EOF
 
 # SSH into instances
 ssh -i ~/.ssh/ai-portal-key ec2-user@$(terraform output -raw open_webui_public_ip)
+ssh -i ~/.ssh/ai-portal-key ec2-user@$(terraform output -raw keycloak_public_ip)
 ssh -i ~/.ssh/ai-portal-key ec2-user@$(terraform output -raw bedrock_gateway_public_ip)
 
-# Check Docker logs
+# Check Keycloak
+ssh ec2-user@$(terraform output -raw keycloak_public_ip)
+sudo docker logs keycloak
+curl http://localhost:8080/health/ready  # Should return: {"status":"UP"}
+
+# Check Open WebUI
+ssh ec2-user@$(terraform output -raw open_webui_public_ip)
 sudo docker logs open-webui
 sudo docker ps
 
 # Check Bedrock Gateway
+ssh ec2-user@$(terraform output -raw bedrock_gateway_public_ip)
 sudo systemctl status bedrock-gateway
 sudo journalctl -u bedrock-gateway -f
 
-# Test health
+# Test health endpoints
 curl http://$(terraform output -raw bedrock_gateway_private_ip):8000/health
+curl https://auth.forora.com/health/ready  # Keycloak via ALB
 ```
 
 ---
@@ -352,61 +380,83 @@ sudo journalctl -u bedrock-gateway -n 100
 curl http://localhost:8000/api/tags | jq
 ```
 
-### LDAP Authentication Setup (WORKING PROCEDURE)
+### Keycloak SSO Troubleshooting
 
-**✅ Confirmed working as of 2025-11-17 with Open WebUI v0.6.36**
+**✅ Keycloak SSO is fully automated and configured during deployment**
 
-#### Step 1: Create AD User
+#### No SSO Button on Login Page
 
+**Symptom:** Username/password form shows instead of SSO button
+
+**Check:**
 ```bash
-AD_DIR_ID=$(terraform output -raw active_directory_id)
-
-# Enable Directory Data Access API (first time only)
-aws-vault exec personal -- aws ds enable-directory-data-access \
-  --directory-id "$AD_DIR_ID" \
-  --region eu-west-2
-
-# Create user
-aws-vault exec personal -- aws ds-data create-user \
-  --directory-id "$AD_DIR_ID" \
-  --sam-account-name testuser \
-  --given-name "Test" \
-  --surname "User" \
-  --email-address "testuser@corp.aiportal.local" \
-  --region eu-west-2
-
-# Set password (avoid special characters like !)
-aws-vault exec personal -- aws ds reset-user-password \
-  --directory-id "$AD_DIR_ID" \
-  --user-name testuser \
-  --new-password "Welcome@2024" \
-  --region eu-west-2
+ssh ec2-user@$(terraform output -raw open_webui_public_ip)
+cat /opt/open-webui/.env | grep -E "OPENID_PROVIDER_URL|ENABLE_LOGIN_FORM"
 ```
 
-#### Step 2: Create Initial Admin Account (for LDAP UI)
-
-```bash
-WEBUI_IP=$(terraform output -raw open_webui_public_ip)
-
-curl -X POST http://$WEBUI_IP:8080/api/v1/auths/signup \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Admin",
-    "email": "admin@example.com",
-    "password": "admin123"
-  }'
+**Should show:**
+```
+OPENID_PROVIDER_URL=https://auth.forora.com/realms/aiportal/.well-known/openid-configuration
+ENABLE_LOGIN_FORM=false
 ```
 
-**Why needed:** Without at least one user, Open WebUI shows signup screen instead of login screen with LDAP option.
+**Fix:**
+```bash
+cd /opt/open-webui
+# Verify .env is correct
+sudo nano .env  # Check OPENID_PROVIDER_URL and ENABLE_LOGIN_FORM
+# Recreate container (restart doesn't reload .env!)
+sudo docker-compose down && sudo docker-compose up -d
+# Clear browser cache / hard refresh
+```
 
-#### Step 3: Login with LDAP
+#### LDAP Authentication Fails in Keycloak
 
-1. Access Open WebUI: `http://<webui_ip>:8080`
-2. Click "Sign in with SSO" or LDAP option
-3. Enter credentials:
-   - Username: `testuser`
-   - Password: `Welcome@2024`
-4. ✅ Should login successfully!
+**Symptom:** Login redirects to Keycloak but fails with authentication error
+
+**Check LDAP config in Keycloak Admin:**
+1. Login to https://auth.forora.com/admin
+2. Go to: User Federation → active-directory
+3. Click "Test authentication" button
+4. Enter: Username=`testuser`, Password=`Welcome@2024`
+5. Should show "Success"
+
+**If fails:**
+```bash
+ssh ec2-user@$(terraform output -raw keycloak_public_ip)
+sudo docker logs keycloak | grep -i "ldap\|authentication"
+
+# Check AD is reachable
+AD_IP=$(terraform output -raw active_directory_dns_ips | cut -d',' -f1 | tr -d '[] "')
+telnet $AD_IP 389  # Should connect
+
+# Verify bind credentials match
+echo "Bind DN: Admin@corp.aiportal.local"
+echo "Bind Password: (check terraform.tfvars ad_admin_password)"
+```
+
+#### Keycloak Won't Start
+
+**Symptom:** Keycloak container not running
+
+**Check:**
+```bash
+ssh ec2-user@$(terraform output -raw keycloak_public_ip)
+sudo docker ps -a | grep keycloak
+sudo docker logs keycloak
+
+# Common issues:
+# 1. Database connection failed
+DB_ENDPOINT=$(terraform output -raw rds_endpoint | cut -d: -f1)
+psql -h $DB_ENDPOINT -U aiportaladmin -d keycloak  # Test DB access
+
+# 2. Database doesn't exist
+psql -h $DB_ENDPOINT -U aiportaladmin -d postgres -c "\l" | grep keycloak
+
+# 3. Restart container
+cd /opt/keycloak
+sudo docker-compose restart
+```
 
 ### Troubleshooting Models Not Appearing
 
@@ -444,61 +494,6 @@ EOF
 
 **Root Cause:** Open WebUI v0.6.36 requires models to be populated in the `model` table. Even though `OLLAMA_BASE_URL` is set correctly and the Bedrock Gateway is working, models won't appear until they're explicitly added to the database with `is_active=1` and `access_control=NULL`.
 
-### Troubleshooting LDAP
-
-**Error: "Application account bind failed"**
-
-This means the LDAP admin credentials are wrong. Check:
-
-```bash
-ssh ec2-user@$(terraform output -raw open_webui_public_ip)
-cat /opt/open-webui/.env | grep LDAP_APP
-
-# Verify password matches AD
-# If you need to change it, edit .env and RECREATE container:
-cd /opt/open-webui
-sudo nano .env  # Edit LDAP_APP_PASSWORD
-sudo docker-compose down && sudo docker-compose up -d  # MUST use down/up, not restart!
-```
-
-**Error: "The email or password provided is incorrect"**
-
-After confirming LDAP bind works, this usually means auth/users table mismatch. Check:
-
-```bash
-ssh ec2-user@$(terraform output -raw open_webui_public_ip)
-sudo docker exec -i open-webui python3 <<'EOF'
-from open_webui.models.users import Users
-from sqlalchemy import create_engine, text
-from open_webui.internal.db import engine
-
-email = 'testuser@corp.aiportal.local'
-user = Users.get_user_by_email(email)
-print(f'Users table: {user.email if user else "NOT FOUND"}')
-
-with engine.connect() as conn:
-    result = conn.execute(text(f"SELECT email FROM auth WHERE email = '{email}'"))
-    auth = result.fetchone()
-    print(f'Auth table: {auth[0] if auth else "NOT FOUND"}')
-EOF
-```
-
-If user exists in `users` but NOT in `auth`, delete the user and let LDAP recreate it properly:
-
-```bash
-sudo docker exec -i open-webui python3 <<'EOF'
-from open_webui.models.users import Users
-user = Users.get_user_by_email('testuser@corp.aiportal.local')
-if user:
-    Users.delete_user_by_id(user.id)
-    print('Deleted user - try LDAP login again')
-EOF
-```
-
-**No LDAP Login Option in UI**
-
-Create an initial admin account (see Step 2 above).
-
 ### Database Connection Issues
 
 ```bash
@@ -513,99 +508,67 @@ psql -h $DB_ENDPOINT -U aiportaladmin -d aiportal
 
 ---
 
-## 📖 Lessons Learned - LDAP Debugging (2025-11-17)
+## 📖 Lessons Learned - Keycloak SSO Implementation (2025-11-18)
 
-### ✅ ROOT CAUSE IDENTIFIED AND FIXED
+### ✅ KEYCLOAK SSO: FULLY AUTOMATED AND WORKING
 
-After extensive debugging, LDAP authentication now WORKS with a fully repeatable procedure. The root cause was **database table mismatch**, NOT fundamental LDAP bugs.
+After replacing direct LDAP authentication with Keycloak SSO, we now have a **fully automated, enterprise-grade authentication system** that's completely repeatable.
 
-### The Actual Problem
+### Why Keycloak Instead of Direct LDAP?
 
-**Open WebUI has TWO separate tables for users:**
-1. `users` table - Stores user profile (name, email, role, etc.)
-2. `auth` table - Stores authentication credentials (email, password hash, active status)
+**Previous approach (Direct LDAP):**
+- ❌ Complex Open WebUI LDAP configuration prone to bugs
+- ❌ Database table mismatch issues
+- ❌ No centralized user management
+- ❌ Limited SSO capabilities
 
-**LDAP authentication flow:**
-1. Binds with application account (Admin@corp.aiportal.local)
-2. Searches for user by sAMAccountName
-3. Binds as the user to verify password
-4. **Checks if user exists in `users` table:**
-   - If **NO** → calls `Auths.insert_new_auth()` which creates entries in BOTH `auth` and `users` tables ✅
-   - If **YES** → assumes `auth` entry already exists and SKIPS creation ❌
-5. Calls `Auths.authenticate_user_by_trusted_header()` which requires an `auth` table entry
-6. If no `auth` entry found → returns "The email or password provided is incorrect"
+**Current approach (Keycloak + LDAP Federation):**
+- ✅ Keycloak handles all LDAP complexity
+- ✅ Centralized identity management
+- ✅ OIDC protocol (industry standard)
+- ✅ No local password storage in Open WebUI
+- ✅ Better audit logs and security
 
-### What We Did Wrong
+### Key Implementation Insights
 
-We manually created a user in the `users` table (via `Users.insert_new_user()`), which caused:
-- ✅ User exists in `users` table
-- ❌ NO entry in `auth` table
-- ❌ LDAP skips `insert_new_auth()` because user already exists
-- ❌ `authenticate_user_by_trusted_header()` fails because no `auth` entry
-- ❌ Error: "The email or password provided is incorrect"
+#### Issue 1: Password Special Characters
+**Lesson:** Avoid `!` in `db_password` and `keycloak_admin_password` due to shell escaping in docker-compose.yml
+**Solution:** Only `ad_admin_password` can have `!` (properly escaped in LDAP config JSON)
 
-**Even though LDAP authentication succeeded**, the final database lookup failed.
+#### Issue 2: Environment Variable Names
+**Symptom:** No SSO button shown in Open WebUI
+**Root Cause:** Wrong env var name (`OAUTH_DISCOVERY_URL` instead of `OPENID_PROVIDER_URL`)
+**Solution:** Use `OPENID_PROVIDER_URL` and set `ENABLE_LOGIN_FORM=false`
 
-### Other Issues Discovered
+#### Issue 3: Container Restarts Don't Reload .env
+**Learning:** `docker-compose restart` does NOT reload environment variables
+**Solution:** Always use `docker-compose down && docker-compose up -d` after .env changes
 
-#### Issue 1: Password with Special Characters
-**Symptom:** "Application account bind failed"
-**Root Cause:** `LDAP_APP_PASSWORD` in terraform.tfvars had `!` character. When changed in .env, container wasn't reloaded properly.
-**Solution:** Use password without `!` and recreate container with `docker-compose down && up` (NOT `restart`)
-**Learning:** `docker-compose restart` does NOT reload .env file
+#### Issue 4: Keycloak Startup Command
+**Problem:** `--proxy=edge` flag invalid in Keycloak 26.0
+**Solution:** Use `start-dev` for development/POC deployments
 
-#### Issue 2: {username} Placeholder in Search Filter
-**Symptom:** Would cause "User not found" in some versions
-**Root Cause:** GitHub issues #16760, #14993 document this bug
-**Solution:** Use static filter: `(&(objectClass=user)(objectCategory=person))`
-**Note:** This works fine; LDAP searches for all users in base, then filters by sAMAccountName in code
+### This Infrastructure IS Fully Repeatable
 
-#### Issue 3: LDAP Login Option Missing
-**Symptom:** No LDAP option shown in UI after fresh deployment
-**Root Cause:** Open WebUI shows signup page when there are zero users
-**Solution:** Create one user via `/api/v1/auths/signup` first, then LDAP option appears
+**One command deployment:**
+1. `terraform apply`
+2. Wait 25-35 minutes
+3. ✅ Visit https://ai.forora.com and login with SSO!
 
-#### Issue 4: ENABLE_PERSISTENT_CONFIG
-**Symptom:** LDAP config doesn't persist when set via admin UI
-**Root Cause:** v0.6.36 has issues with database-stored configuration
-**Solution:** Set `ENABLE_PERSISTENT_CONFIG=false` and use environment variables
+**Everything is automated:**
+- Keycloak database creation
+- LDAP federation configuration
+- OIDC client creation
+- Test user creation in AD
+- Model synchronization
 
-### Working Configuration (Confirmed 2025-11-17)
+### Architecture Decisions
 
-```bash
-# /opt/open-webui/.env
-ENABLE_PERSISTENT_CONFIG=false
-ENABLE_SIGNUP=true
-ENABLE_LDAP=true
-LDAP_SERVER_HOST=10.0.10.214
-LDAP_SERVER_PORT=389
-LDAP_USE_TLS=false
-LDAP_APP_DN=Admin@corp.aiportal.local    # UPN format works fine
-LDAP_APP_PASSWORD=SecurePassword2024     # No special characters
-LDAP_SEARCH_BASE=OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local
-LDAP_SEARCH_FILTER=(&(objectClass=user)(objectCategory=person))  # Static filter, no {username}
-LDAP_ATTRIBUTE_FOR_USERNAME=sAMAccountName
-LDAP_ATTRIBUTE_FOR_MAIL=mail
-```
-
-### Key Takeaways
-
-1. **Never manually create users for LDAP** - Let LDAP create them via first login
-2. **Always recreate containers after .env changes** - Use `down && up`, not `restart`
-3. **Avoid special characters in passwords** - Especially `!` which can cause shell escaping issues
-4. **Create initial admin via API** - Required to show LDAP login option
-5. **LDAP itself works fine** - The issues were configuration and database management, not LDAP protocol
-
-### This Infrastructure IS Repeatable
-
-Following the documented procedure:
-1. Deploy infrastructure with terraform
-2. Create AD user via AWS CLI
-3. Create initial admin via curl
-4. Login with LDAP credentials
-5. ✅ **It just works!**
-
-Previous claims that "this isn't repeatable" were based on misunderstanding the root cause. With the correct procedure, LDAP authentication is 100% reliable.
+1. **Shared PostgreSQL RDS** - Two databases (`aiportal`, `keycloak`) for cost efficiency
+2. **Keycloak in Docker** - Easy updates and version management
+3. **Host-based ALB routing** - Single load balancer for both services
+4. **OIDC over SAML** - Simpler, more modern, better for APIs
+5. **Read-only LDAP** - Keycloak doesn't modify AD, only reads
 
 ---
 
@@ -620,8 +583,9 @@ Previous claims that "this isn't repeatable" were based on misunderstanding the 
 ### Security Groups
 - **ALB**: Allows 80 (redirect), 443 (TLS 1.3)
 - **Open WebUI**: Allows 8080 from ALB only
+- **Keycloak**: Allows 8080 from ALB only, LDAP (389) to AD
 - **Bedrock Gateway**: Allows 8000 from VPC + SSH
-- **RDS**: Allows 5432 from EC2 instances only
+- **RDS**: Allows 5432 from Open WebUI and Keycloak only
 - **AD**: Allows LDAP/Kerberos/DNS from VPC
 
 ### IAM Permissions
@@ -633,11 +597,14 @@ EC2 instances have IAM role with:
 
 ### Open WebUI Configuration
 Environment variables set in `userdata_open_webui.sh`:
-- `DATABASE_URL` - PostgreSQL connection
 - `OLLAMA_BASE_URL` - Points to Bedrock Gateway
-- `ENABLE_LDAP=true` - Active Directory auth
-- `SAVE_CHAT_HISTORY=false` - No chat history storage
+- `OPENID_PROVIDER_URL` - Keycloak OIDC discovery endpoint
+- `OAUTH_CLIENT_ID=openwebui` - OIDC client identifier
+- `OAUTH_CLIENT_SECRET` - Client secret for authentication
+- `ENABLE_LOGIN_FORM=false` - Hide local login, use SSO only
+- `ENABLE_OAUTH_SIGNUP=true` - Auto-create users on first SSO login
 - `ENABLE_SIGNUP=false` - No self-registration
+- `SAVE_CHAT_HISTORY=false` - No chat history storage
 
 ### Bedrock Gateway
 FastAPI application (`userdata_bedrock_gateway.sh`):
@@ -729,15 +696,19 @@ If all checked, you can safely `terraform destroy` and rebuild anytime!
 
 ## 📚 Additional Resources
 
+- **Keycloak Setup Guide**: See [KEYCLOAK_SETUP.md](KEYCLOAK_SETUP.md) for detailed Keycloak configuration
 - **Terraform**: https://www.terraform.io/docs
 - **AWS Bedrock**: https://docs.aws.amazon.com/bedrock/
 - **Open WebUI**: https://github.com/open-webui/open-webui
+- **Keycloak**: https://www.keycloak.org/documentation
 - **AWS Directory Service**: https://docs.aws.amazon.com/directoryservice/
 
 ---
 
-**Version:** 1.1
-**Last Updated:** 2025-11-17
+**Version:** 2.0
+**Last Updated:** 2025-11-18
 **Terraform:** >= 1.0
 **AWS Provider:** ~> 5.0
-**Open WebUI:** v0.6.36 (main tag) - **LDAP authentication WORKS, see LDAP Setup Procedure section**
+**Open WebUI:** ghcr.io/open-webui/open-webui:main
+**Keycloak:** quay.io/keycloak/keycloak:26.0
+**Authentication:** Keycloak SSO with OIDC + LDAP federation to Active Directory

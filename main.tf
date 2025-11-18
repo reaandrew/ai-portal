@@ -265,6 +265,14 @@ resource "aws_security_group" "rds" {
     security_groups = [aws_security_group.bedrock_gateway.id]
   }
 
+  ingress {
+    description     = "PostgreSQL from Keycloak"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.keycloak.id]
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0
@@ -402,7 +410,9 @@ resource "aws_iam_role_policy" "bedrock_access" {
         Action = [
           "ds:EnableDirectoryDataAccess",
           "ds:ResetUserPassword",
-          "ds-data:CreateUser"
+          "ds:AccessDSData",
+          "ds-data:CreateUser",
+          "ds-data:DescribeUser"
         ]
         Resource = "*"
       }
@@ -559,15 +569,90 @@ resource "aws_instance" "bedrock_gateway" {
   depends_on = [aws_nat_gateway.main]
 }
 
+# Security Group for Keycloak
+resource "aws_security_group" "keycloak" {
+  name        = "${var.project_name}-keycloak-sg"
+  description = "Allow traffic to Keycloak"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "HTTP from ALB"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-keycloak-sg"
+  }
+}
+
+# EC2 Instance - Keycloak
+resource "aws_instance" "keycloak" {
+  ami                    = data.aws_ami.amazon_linux_2023.id
+  instance_type          = var.keycloak_instance_type
+  subnet_id              = aws_subnet.public[0].id
+  vpc_security_group_ids = [aws_security_group.keycloak.id]
+  iam_instance_profile   = aws_iam_instance_profile.bedrock_access.name
+  key_name               = aws_key_pair.main.key_name
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = templatefile("${path.module}/userdata_keycloak.sh", {
+    aws_region              = var.aws_region
+    db_endpoint             = split(":", aws_db_instance.postgres.endpoint)[0]
+    db_name                 = "keycloak"
+    db_username             = var.db_username
+    db_password             = var.db_password
+    ad_server               = join(",", aws_directory_service_directory.main.dns_ip_addresses)
+    ad_base_dn              = "OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local"
+    ad_bind_dn              = "Admin@corp.aiportal.local"
+    ad_bind_password        = var.ad_admin_password
+    keycloak_admin_user     = "admin"
+    keycloak_admin_password = var.ad_admin_password
+    keycloak_subdomain      = var.keycloak_subdomain
+    domain_name             = var.domain_name
+    openwebui_url           = "https://${var.subdomain}.${var.domain_name}"
+  })
+
+  tags = {
+    Name = "${var.project_name}-keycloak"
+  }
+
+  depends_on = [aws_db_instance.postgres, aws_nat_gateway.main]
+}
+
 # Route53 Hosted Zone Data Source
 data "aws_route53_zone" "main" {
   name         = var.domain_name
   private_zone = false
 }
 
-# ACM Certificate for subdomain (e.g., ai.forora.com)
+# ACM Certificate for subdomains (ai.forora.com and auth.forora.com)
 resource "aws_acm_certificate" "ai_portal" {
   domain_name       = "${var.subdomain}.${var.domain_name}"
+  subject_alternative_names = ["${var.keycloak_subdomain}.${var.domain_name}"]
   validation_method = "DNS"
 
   lifecycle {
@@ -703,6 +788,43 @@ resource "aws_lb_target_group_attachment" "open_webui" {
   port             = 8080
 }
 
+# Target Group for Keycloak
+resource "aws_lb_target_group" "keycloak" {
+  name     = "${var.project_name}-keycloak-tg"
+  port     = 8080
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/health/ready"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+    unhealthy_threshold = 3
+  }
+
+  stickiness {
+    type            = "lb_cookie"
+    cookie_duration = 86400
+    enabled         = true
+  }
+
+  tags = {
+    Name = "${var.project_name}-keycloak-tg"
+  }
+}
+
+# Attach Keycloak instance to target group
+resource "aws_lb_target_group_attachment" "keycloak" {
+  target_group_arn = aws_lb_target_group.keycloak.arn
+  target_id        = aws_instance.keycloak.id
+  port             = 8080
+}
+
 # HTTPS Listener with TLS 1.3
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.main.arn
@@ -711,9 +833,48 @@ resource "aws_lb_listener" "https" {
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = aws_acm_certificate_validation.ai_portal.certificate_arn
 
+  # Default action - return 404
   default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Not Found"
+      status_code  = "404"
+    }
+  }
+}
+
+# Listener Rule for Open WebUI (ai.forora.com)
+resource "aws_lb_listener_rule" "open_webui" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 100
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.open_webui.arn
+  }
+
+  condition {
+    host_header {
+      values = ["${var.subdomain}.${var.domain_name}"]
+    }
+  }
+}
+
+# Listener Rule for Keycloak (auth.forora.com)
+resource "aws_lb_listener_rule" "keycloak" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 101
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.keycloak.arn
+  }
+
+  condition {
+    host_header {
+      values = ["${var.keycloak_subdomain}.${var.domain_name}"]
+    }
   }
 }
 
@@ -738,6 +899,19 @@ resource "aws_lb_listener" "http" {
 resource "aws_route53_record" "ai_portal" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = "${var.subdomain}.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.main.dns_name
+    zone_id                = aws_lb.main.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# Route53 A record for Keycloak subdomain (auth.forora.com)
+resource "aws_route53_record" "keycloak" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = "${var.keycloak_subdomain}.${var.domain_name}"
   type    = "A"
 
   alias {

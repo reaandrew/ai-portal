@@ -77,3 +77,28 @@ output "certificate_arn" {
   value       = aws_acm_certificate.ai_portal.arn
 }
 
+output "keycloak_public_ip" {
+  description = "Public IP address of Keycloak instance"
+  value       = aws_instance.keycloak.public_ip
+}
+
+output "keycloak_url" {
+  description = "HTTPS URL to access Keycloak"
+  value       = "https://${var.keycloak_subdomain}.${var.domain_name}"
+}
+
+output "keycloak_admin_console" {
+  description = "Keycloak Admin Console URL"
+  value       = "https://${var.keycloak_subdomain}.${var.domain_name}/admin"
+}
+
+output "keycloak_oidc_discovery" {
+  description = "OIDC Discovery URL for aiportal realm"
+  value       = "https://${var.keycloak_subdomain}.${var.domain_name}/realms/aiportal/.well-known/openid-configuration"
+}
+
+output "ssh_connection_keycloak" {
+  description = "SSH command to connect to Keycloak instance"
+  value       = "ssh -i ~/.ssh/${var.key_name}.pem ec2-user@${aws_instance.keycloak.public_ip}"
+}
+
