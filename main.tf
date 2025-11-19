@@ -622,9 +622,12 @@ resource "aws_instance" "keycloak" {
   user_data = templatefile("${path.module}/userdata_keycloak.sh", {
     aws_region              = var.aws_region
     db_endpoint             = split(":", aws_db_instance.postgres.endpoint)[0]
+    db_port                 = aws_db_instance.postgres.port
+    db_admin_database       = "postgres"
     db_name                 = "keycloak"
     db_username             = var.db_username
     db_password             = var.db_password
+    db_sslmode              = "require"
     ad_server               = join(",", aws_directory_service_directory.main.dns_ip_addresses)
     ad_base_dn              = "OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local"
     ad_bind_dn              = "Admin@corp.aiportal.local"

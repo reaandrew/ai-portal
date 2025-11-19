@@ -232,6 +232,83 @@ aws ds enable-directory-data-access \
 echo "Waiting 30 seconds for DS Data Access to be ready..."
 sleep 30
 
+# Create Admin user in Active Directory first
+echo "Creating Admin user in Active Directory..."
+aws ds-data create-user \
+  --directory-id "${ad_directory_id}" \
+  --sam-account-name Admin \
+  --given-name "Admin" \
+  --surname "User" \
+  --email-address "Admin@corp.aiportal.local" \
+  --region ${aws_region} || echo "⚠️  Admin user may already exist"
+
+echo "Setting Admin password..."
+aws ds reset-user-password \
+  --directory-id "${ad_directory_id}" \
+  --user-name Admin \
+  --new-password "Welcome@2024" \
+  --region ${aws_region} || echo "⚠️  Failed to set Admin password"
+
+# Wait for LDAP sync in Keycloak
+echo "Waiting 15 seconds for LDAP sync to Keycloak..."
+sleep 15
+
+# Create Admin user in Open WebUI database with admin role
+echo "Creating Admin account in Open WebUI database..."
+docker exec -i open-webui python3 <<'ADMIN_SETUP'
+import os
+import time
+os.environ['DATA_DIR'] = '/app/backend/data'
+
+# Wait for database
+max_retries = 10
+for i in range(max_retries):
+    try:
+        from open_webui.internal.db import engine
+        from sqlalchemy import text
+        break
+    except Exception as e:
+        if i < max_retries - 1:
+            time.sleep(2)
+        else:
+            print(f'ERROR: Database not ready: {e}')
+            import sys
+            sys.exit(1)
+
+# Create Admin user with admin role
+with engine.connect() as conn:
+    # Check if Admin already exists
+    result = conn.execute(text("SELECT id FROM user WHERE email = 'admin@corp.aiportal.local'"))
+    if result.fetchone() is None:
+        # Create Admin user
+        import uuid
+        from datetime import datetime
+        user_id = str(uuid.uuid4())
+        timestamp = int(datetime.now().timestamp())
+
+        conn.execute(
+            text("""
+                INSERT INTO user (id, name, email, role, profile_image_url, created_at, updated_at, api_key, settings, info)
+                VALUES (:id, :name, :email, 'admin', '/user.png', :created_at, :updated_at, NULL, '{}', '{}')
+            """),
+            {
+                'id': user_id,
+                'name': 'Admin',
+                'email': 'admin@corp.aiportal.local',
+                'created_at': timestamp,
+                'updated_at': timestamp
+            }
+        )
+        conn.commit()
+        print('✅ Admin user created with admin role')
+    else:
+        # Update existing user to admin role
+        conn.execute(text("UPDATE user SET role = 'admin' WHERE email = 'admin@corp.aiportal.local'"))
+        conn.commit()
+        print('✅ Admin user promoted to admin role')
+ADMIN_SETUP
+
+# Now create testuser as regular user
 echo "Creating testuser in Active Directory..."
 aws ds-data create-user \
   --directory-id "${ad_directory_id}" \
@@ -250,4 +327,11 @@ aws ds reset-user-password \
 
 echo "✅ Open WebUI setup complete!"
 echo "✅ Login via Keycloak at: https://ai.forora.com"
-echo "✅ Use testuser@corp.aiportal.local / Welcome@2024"
+echo ""
+echo "Admin user (admin role):"
+echo "  Username: Admin"
+echo "  Password: Welcome@2024"
+echo ""
+echo "Test user (regular user):"
+echo "  Username: testuser"
+echo "  Password: Welcome@2024"

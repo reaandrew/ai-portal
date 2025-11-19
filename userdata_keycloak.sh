@@ -21,7 +21,9 @@ yum install -y jq
 # Create Keycloak database in PostgreSQL RDS
 echo "Creating Keycloak database in RDS..."
 export PGPASSWORD="${db_password}"
-psql -h ${db_endpoint} -U ${db_username} -d ${db_name} -c "CREATE DATABASE keycloak;" || echo "Database may already exist"
+# Connect to admin database to create keycloak database
+psql "host=${db_endpoint} port=${db_port} dbname=${db_admin_database} user=${db_username} sslmode=${db_sslmode}" \
+  -c "CREATE DATABASE ${db_name};" || echo "Database may already exist"
 
 # Create application directory
 mkdir -p /opt/keycloak
