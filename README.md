@@ -694,6 +694,42 @@ If all checked, you can safely `terraform destroy` and rebuild anytime!
 
 ---
 
+## 🤖 Client Integrations
+
+### Aider (AI Pair Programmer)
+
+[Aider](https://aider.chat) can connect to the AI Portal to use Bedrock models via the OpenAI-compatible API.
+
+**Prerequisites:**
+1. Get your API key from Open WebUI: Settings → Account → API Keys → Create new key
+2. Create `~/.aider.model.settings.yml` with the following content:
+
+```yaml
+- name: "openai/anthropic.claude-3-7-sonnet-20250219-v1:0"
+  use_system_prompt: false
+```
+
+**Usage:**
+
+```bash
+aider --no-stream \
+  --model openai/anthropic.claude-3-7-sonnet-20250219-v1:0 \
+  --openai-api-base https://portal.openwebui.demos.apps.equal.expert/api \
+  --openai-api-key <YOUR_API_KEY>
+```
+
+Replace `<YOUR_API_KEY>` with your actual API key from Open WebUI.
+
+**⚠️ Known Issue: Streaming Not Working**
+
+Currently, streaming responses do not work correctly with Aider (requires `--no-stream` flag). This needs investigation:
+
+- **Symptom:** Streaming mode hangs or produces incomplete responses
+- **Workaround:** Use `--no-stream` flag
+- **TODO:** Investigate whether this is a Bedrock Gateway issue, Open WebUI API compatibility issue, or Aider-specific behaviour with the OpenAI-compatible endpoint
+
+---
+
 ## 📚 Additional Resources
 
 - **Keycloak Setup Guide**: See [KEYCLOAK_SETUP.md](KEYCLOAK_SETUP.md) for detailed Keycloak configuration
