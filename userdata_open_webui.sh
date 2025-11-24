@@ -24,11 +24,11 @@ cd /opt/open-webui
 
 # Wait for Keycloak to be ready before configuring OIDC
 echo "Waiting for Keycloak to be ready..."
-KEYCLOAK_URL="https://auth.forora.com"
+KEYCLOAK_URL="${keycloak_url}"
 MAX_WAIT=600  # 10 minutes (Keycloak takes time to boot)
 ELAPSED=0
 
-while ! curl -sf "$KEYCLOAK_URL/health/ready" > /dev/null 2>&1; do
+while ! curl -sf "$KEYCLOAK_URL/realms/master" > /dev/null 2>&1; do
     if [ $ELAPSED -ge $MAX_WAIT ]; then
         echo "WARNING: Keycloak not ready after $MAX_WAIT seconds, configuring anyway..."
         break
@@ -48,7 +48,7 @@ DEFAULT_USER_ROLE=user
 ENABLE_PERSISTENT_CONFIG=false
 ENABLE_OAUTH_SIGNUP=true
 OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
-OPENID_PROVIDER_URL=https://auth.forora.com/realms/aiportal/.well-known/openid-configuration
+OPENID_PROVIDER_URL=${keycloak_url}/realms/aiportal/.well-known/openid-configuration
 OAUTH_CLIENT_ID=openwebui
 OAUTH_CLIENT_SECRET=openwebui-secret-change-this
 OAUTH_SCOPES=openid email profile
@@ -239,14 +239,24 @@ aws ds-data create-user \
   --sam-account-name Admin \
   --given-name "Admin" \
   --surname "User" \
-  --email-address "Admin@corp.aiportal.local" \
+  --email-address "admin@corp.aiportal.local" \
   --region ${aws_region} || echo "⚠️  Admin user may already exist"
 
-echo "Setting Admin password..."
+# Explicitly set email address (create-user may not set it properly)
+echo "Setting Admin email address..."
+aws ds-data update-user \
+  --directory-id "${ad_directory_id}" \
+  --sam-account-name Admin \
+  --email-address "admin@corp.aiportal.local" \
+  --region ${aws_region} || echo "⚠️  Failed to set Admin email"
+
+# NOTE: Admin password is set to ad_admin_password (used as LDAP bind credential)
+# Do NOT reset it here as it would break Keycloak LDAP authentication
+echo "Setting Admin password to match LDAP bind credential..."
 aws ds reset-user-password \
   --directory-id "${ad_directory_id}" \
   --user-name Admin \
-  --new-password "Welcome@2024" \
+  --new-password "${ad_admin_password}" \
   --region ${aws_region} || echo "⚠️  Failed to set Admin password"
 
 # Wait for LDAP sync in Keycloak
@@ -288,15 +298,16 @@ with engine.connect() as conn:
 
         conn.execute(
             text("""
-                INSERT INTO user (id, name, email, role, profile_image_url, created_at, updated_at, api_key, settings, info)
-                VALUES (:id, :name, :email, 'admin', '/user.png', :created_at, :updated_at, NULL, '{}', '{}')
+                INSERT INTO user (id, name, email, role, profile_image_url, created_at, updated_at, last_active_at, api_key, settings, info)
+                VALUES (:id, :name, :email, 'admin', '/user.png', :created_at, :updated_at, :last_active_at, NULL, '{}', '{}')
             """),
             {
                 'id': user_id,
                 'name': 'Admin',
                 'email': 'admin@corp.aiportal.local',
                 'created_at': timestamp,
-                'updated_at': timestamp
+                'updated_at': timestamp,
+                'last_active_at': timestamp
             }
         )
         conn.commit()
@@ -326,11 +337,11 @@ aws ds reset-user-password \
   --region ${aws_region} || echo "⚠️  Failed to set password"
 
 echo "✅ Open WebUI setup complete!"
-echo "✅ Login via Keycloak at: https://ai.forora.com"
+echo "✅ Login via Keycloak at: ${open_webui_url}"
 echo ""
 echo "Admin user (admin role):"
 echo "  Username: Admin"
-echo "  Password: Welcome@2024"
+echo "  Password: ${ad_admin_password}"
 echo ""
 echo "Test user (regular user):"
 echo "  Username: testuser"

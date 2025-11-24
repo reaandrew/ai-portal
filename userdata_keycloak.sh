@@ -45,7 +45,7 @@ services:
       KC_DB_URL: "jdbc:postgresql://${db_endpoint}:5432/keycloak"
       KC_DB_USERNAME: "${db_username}"
       KC_DB_PASSWORD: "${db_password}"
-      KC_HOSTNAME: "auth.forora.com"
+      KC_HOSTNAME: "${keycloak_subdomain}.${domain_name}"
       KC_HOSTNAME_STRICT: "false"
       KC_PROXY_HEADERS: "xforwarded"
       KC_HTTP_ENABLED: "true"
@@ -90,7 +90,7 @@ systemctl enable keycloak.service
 echo "Waiting for Keycloak to be ready..."
 MAX_WAIT=300
 ELAPSED=0
-while ! curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; do
+while ! curl -sf http://localhost:8080/realms/master > /dev/null 2>&1; do
     if [ $ELAPSED -ge $MAX_WAIT ]; then
         echo "ERROR: Keycloak did not become ready after $MAX_WAIT seconds"
         exit 1

@@ -4,7 +4,7 @@ terraform {
     key            = "ai-portal/terraform.tfstate"
     region         = "eu-west-2"
     encrypt        = true
-    dynamodb_table = "ai-portal-terraform-locks"
+#    dynamodb_table = "ai-portal-terraform-locks"
   }
 
   required_version = ">= 1.0"
@@ -534,6 +534,8 @@ resource "aws_instance" "open_webui" {
     ad_admin_password = var.ad_admin_password
     ad_directory_id   = aws_directory_service_directory.main.id
     aws_region        = var.aws_region
+    keycloak_url      = "https://${var.keycloak_subdomain}.${var.domain_name}"
+    open_webui_url    = "https://${var.subdomain}.${var.domain_name}"
   })
 
   tags = {

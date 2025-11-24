@@ -148,11 +148,13 @@ EC2 instances run bootstrap scripts on first boot. Timeline:
 - **Keycloak**: ~2 minutes (database creation + container start + LDAP config + OIDC client)
 - **Open WebUI**: ~2 minutes (waits for Keycloak to be ready + model sync)
 
-**The test user is created automatically!** The Open WebUI userdata script:
+**Admin user is created automatically!** The Open WebUI userdata script:
 1. Waits for Keycloak to be ready (max 10 minutes)
 2. Enables Directory Service Data Access
-3. Creates `testuser` in Active Directory
-4. Sets password to `Welcome@2024`
+3. Creates `Admin` user with:
+   - Email: `admin@corp.aiportal.local` (REQUIRED for OAuth/OIDC login)
+   - Password: `ad_admin_password` from terraform.tfvars (also used as LDAP bind credential)
+4. Syncs users from AD to Keycloak via LDAP
 
 ### 4. Access Portal & Login
 
@@ -166,11 +168,16 @@ terraform output ai_portal_url
 2. Click the **SSO** button (no username/password form shown)
 3. Redirected to Keycloak at https://auth.forora.com
 4. Enter AD credentials:
-   - Username: `testuser` (or `testuser@corp.aiportal.local`)
-   - Password: `Welcome@2024`
+   - **Admin user**: Username: `admin`, Password: (value of `ad_admin_password` from terraform.tfvars, default: `YourSecureADPassword123`)
+   - **Test user**: Create manually with `aws ds-data create-user` and ensure email is set
 5. Keycloak authenticates against Active Directory
 6. Redirected back to Open WebUI with OIDC tokens
 7. ✅ Logged in!
+
+**IMPORTANT:**
+- Login with `admin` user FIRST to make them the admin in Open WebUI
+- **Email is REQUIRED**: Open WebUI OAuth requires users to have an email address in Active Directory
+- The LDAP mapper syncs the `mail` attribute from AD to Keycloak's `email` field
 
 **No local password storage** - All authentication handled by Keycloak + AD
 
@@ -410,6 +417,34 @@ sudo docker-compose down && sudo docker-compose up -d
 # Clear browser cache / hard refresh
 ```
 
+#### OAuth Login Fails: "Email or password provided is incorrect"
+
+**Symptom:** Login redirects to Keycloak successfully but Open WebUI shows email/password error
+
+**Root Cause:** Open WebUI requires users to have an email address, but the user in Active Directory has no email set.
+
+**Check Open WebUI logs:**
+```bash
+ssh ec2-user@$(terraform output -raw open_webui_public_ip)
+sudo docker logs open-webui 2>&1 | grep -i "oauth\|email"
+# Look for: "OAuth callback failed, email is missing"
+```
+
+**Fix - Add email to user in AD:**
+```bash
+# For admin user
+aws ds-data update-user \
+  --directory-id $(terraform output -raw active_directory_id) \
+  --sam-account-name Admin \
+  --email-address "admin@corp.aiportal.local" \
+  --region eu-west-2
+
+# Trigger LDAP sync in Keycloak to pull updated email
+# (Use Keycloak Admin Console → User Federation → active-directory → Sync all users)
+```
+
+**Prevention:** The userdata script now automatically sets email for Admin user. For additional users, always include `--email-address` when creating them.
+
 #### LDAP Authentication Fails in Keycloak
 
 **Symptom:** Login redirects to Keycloak but fails with authentication error
@@ -418,13 +453,13 @@ sudo docker-compose down && sudo docker-compose up -d
 1. Login to https://auth.forora.com/admin
 2. Go to: User Federation → active-directory
 3. Click "Test authentication" button
-4. Enter: Username=`testuser`, Password=`Welcome@2024`
+4. Enter: Username=`admin`, Password=`YourSecureADPassword123`
 5. Should show "Success"
 
 **If fails:**
 ```bash
 ssh ec2-user@$(terraform output -raw keycloak_public_ip)
-sudo docker logs keycloak | grep -i "ldap\|authentication"
+sudo docker logs keycloak 2>&1 | tail -100
 
 # Check AD is reachable
 AD_IP=$(terraform output -raw active_directory_dns_ips | cut -d',' -f1 | tr -d '[] "')
