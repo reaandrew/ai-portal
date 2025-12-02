@@ -98,11 +98,20 @@ curl -s -X POST "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer
 curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"clientId":"openwebui","enabled":true,"clientAuthenticatorType":"client-secret","secret":"openwebui-secret-change-this","redirectUris":["${openwebui_url}/*"],"webOrigins":["${openwebui_url}","+"],"protocol":"openid-connect","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":true}' || true
 
+# Create realm roles for Open WebUI role management
+curl -s -X POST "$KC/admin/realms/aiportal/roles" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"admin","description":"Open WebUI Admin"}' || true
+curl -s -X POST "$KC/admin/realms/aiportal/roles" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"user","description":"Open WebUI User"}' || true
+
 # Add mappers
 CID=$(curl -s "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" | jq -r '.[]|select(.clientId=="openwebui")|.id')
 [ -n "$CID" ] && {
   curl -s -X POST "$KC/admin/realms/aiportal/clients/$CID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
     -d '{"name":"email","protocol":"openid-connect","protocolMapper":"oidc-usermodel-property-mapper","config":{"user.attribute":"email","claim.name":"email","jsonType.label":"String","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+  # Add realm roles mapper for Open WebUI role management
+  curl -s -X POST "$KC/admin/realms/aiportal/clients/$CID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"name":"realm-roles","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper","config":{"claim.name":"roles","jsonType.label":"String","multivalued":"true","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
 }
 
 log "10/10 Verify"

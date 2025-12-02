@@ -111,3 +111,9 @@ variable "keycloak_instance_type" {
   type        = string
   default     = "t3.small"
 }
+
+variable "max_conversation_turns" {
+  description = "Maximum conversation turns allowed for regular users"
+  type        = number
+  default     = 10
+}

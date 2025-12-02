@@ -525,18 +525,20 @@ resource "aws_instance" "open_webui" {
   }
 
   user_data = templatefile("${path.module}/userdata_open_webui.sh", {
-    db_host           = aws_db_instance.postgres.address
-    db_name           = var.db_name
-    db_user           = var.db_username
-    db_password       = var.db_password
-    bedrock_gateway   = aws_instance.bedrock_gateway.private_ip
-    ad_dns_ips        = join(",", aws_directory_service_directory.main.dns_ip_addresses)
-    ad_domain         = var.ad_domain_name
-    ad_admin_password = var.ad_admin_password
-    ad_directory_id   = aws_directory_service_directory.main.id
-    aws_region        = var.aws_region
-    keycloak_url      = "https://${var.keycloak_subdomain}.${var.domain_name}"
-    open_webui_url    = "https://${var.subdomain}.${var.domain_name}"
+    db_host                = aws_db_instance.postgres.address
+    db_name                = var.db_name
+    db_user                = var.db_username
+    db_password            = var.db_password
+    bedrock_gateway        = aws_instance.bedrock_gateway.private_ip
+    ad_dns_ips             = join(",", aws_directory_service_directory.main.dns_ip_addresses)
+    ad_domain              = var.ad_domain_name
+    ad_admin_password      = var.ad_admin_password
+    ad_directory_id        = aws_directory_service_directory.main.id
+    aws_region             = var.aws_region
+    keycloak_url            = "https://${var.keycloak_subdomain}.${var.domain_name}"
+    open_webui_url          = "https://${var.subdomain}.${var.domain_name}"
+    max_conversation_turns  = var.max_conversation_turns
+    keycloak_admin_password = var.ad_admin_password
   })
 
   tags = {
