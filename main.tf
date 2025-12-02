@@ -412,6 +412,7 @@ resource "aws_iam_role_policy" "bedrock_access" {
           "ds:ResetUserPassword",
           "ds:AccessDSData",
           "ds-data:CreateUser",
+          "ds-data:UpdateUser",
           "ds-data:DescribeUser"
         ]
         Resource = "*"
