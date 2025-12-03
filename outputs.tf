@@ -102,3 +102,18 @@ output "ssh_connection_keycloak" {
   value       = "ssh -i ~/.ssh/${var.key_name}.pem ec2-user@${aws_instance.keycloak.public_ip}"
 }
 
+output "langfuse_public_ip" {
+  description = "Public IP address of Langfuse instance"
+  value       = aws_instance.langfuse.public_ip
+}
+
+output "langfuse_url" {
+  description = "HTTPS URL to access Langfuse"
+  value       = "https://${var.langfuse_subdomain}.${var.domain_name}"
+}
+
+output "ssh_connection_langfuse" {
+  description = "SSH command to connect to Langfuse instance"
+  value       = "ssh -i ~/.ssh/${var.key_name}.pem ec2-user@${aws_instance.langfuse.public_ip}"
+}
+

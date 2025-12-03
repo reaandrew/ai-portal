@@ -116,7 +116,7 @@ class Pipeline:
         pipelines: List[str] = ["*"]
         priority: int = 2
         max_turns: int = ${max_conversation_turns}
-        target_user_roles: List[str] = ["user"]
+        target_user_roles: List[str] = ["user", "admin"]
 
     def __init__(self):
         self.type = "filter"
@@ -137,6 +137,147 @@ class Pipeline:
         return body
 PYEOF
 
+# Langfuse v3 filter for token usage tracking
+cat > pipelines/langfuse_filter.py <<PYEOF
+"""
+title: Langfuse Filter Pipeline for v3
+description: A filter pipeline that uses Langfuse v3 for LLM observability
+requirements: langfuse>=3.0.0
+"""
+from typing import List, Optional
+import os, uuid
+from pydantic import BaseModel
+from langfuse import Langfuse
+from utils.pipelines.main import get_last_assistant_message
+
+def get_last_assistant_message_obj(messages: List[dict]) -> dict:
+    for message in reversed(messages):
+        if message["role"] == "assistant":
+            return message
+    return {}
+
+class Pipeline:
+    class Valves(BaseModel):
+        pipelines: List[str] = ["*"]
+        priority: int = 0
+        secret_key: str = ""
+        public_key: str = ""
+        host: str = ""
+        debug: bool = False
+
+    def __init__(self):
+        self.type = "filter"
+        self.name = "Langfuse Filter"
+        self.valves = self.Valves(
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY", "${langfuse_secret_key}"),
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY", "${langfuse_public_key}"),
+            host=os.getenv("LANGFUSE_HOST", "${langfuse_url}"),
+            debug=os.getenv("DEBUG_MODE", "false").lower() == "true",
+        )
+        self.langfuse = None
+        self.chat_traces = {}
+        self.model_names = {}
+
+    async def on_startup(self):
+        self.langfuse = Langfuse(
+            secret_key=self.valves.secret_key,
+            public_key=self.valves.public_key,
+            host=self.valves.host,
+            debug=self.valves.debug,
+        )
+        self.langfuse.auth_check()
+
+    async def on_shutdown(self):
+        if self.langfuse:
+            self.langfuse.flush()
+
+    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        if not self.langfuse:
+            return body
+        metadata = body.get("metadata", {})
+        chat_id = metadata.get("chat_id", str(uuid.uuid4()))
+        if chat_id == "local":
+            chat_id = f"temp-{metadata.get('session_id')}"
+        metadata["chat_id"] = chat_id
+        body["metadata"] = metadata
+        model_id = body.get("model")
+        model_info = metadata.get("model", {})
+        self.model_names[chat_id] = {"id": model_id, "name": model_info.get("name", model_id) if isinstance(model_info, dict) else model_id}
+        user_email = user.get("email") if user else None
+        if chat_id not in self.chat_traces:
+            trace = self.langfuse.start_span(name=f"chat:{chat_id}", input=body, metadata={"user_id": user_email, "session_id": chat_id})
+            trace.update_trace(user_id=user_email, session_id=chat_id, tags=["open-webui"], input=body)
+            self.chat_traces[chat_id] = trace
+            event = trace.start_span(name=f"user_input:{uuid.uuid4()}", input=body["messages"])
+            event.end()
+        return body
+
+    async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        if not self.langfuse:
+            return body
+        chat_id = body.get("chat_id")
+        if chat_id == "local":
+            chat_id = f"temp-{body.get('session_id')}"
+        if chat_id not in self.chat_traces:
+            return body
+        trace = self.chat_traces[chat_id]
+        assistant_message = get_last_assistant_message(body["messages"])
+        assistant_obj = get_last_assistant_message_obj(body["messages"])
+        usage = None
+        if assistant_obj:
+            info = assistant_obj.get("usage", {})
+            if isinstance(info, dict):
+                inp = info.get("prompt_eval_count") or info.get("prompt_tokens")
+                out = info.get("eval_count") or info.get("completion_tokens")
+                if inp and out:
+                    usage = {"input": inp, "output": out, "unit": "TOKENS"}
+        trace.update_trace(output=assistant_message)
+        model_id = self.model_names.get(chat_id, {}).get("id", body.get("model"))
+        gen = trace.start_generation(name=f"llm:{uuid.uuid4()}", model=model_id, input=body["messages"], output=assistant_message)
+        if usage:
+            gen.update(usage=usage)
+        gen.end()
+        self.langfuse.flush()
+        return body
+PYEOF
+
+# OpenTelemetry Collector config for Langfuse integration
+cat > otel-collector-config.yaml <<'OTELEOF'
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  otlphttp:
+    endpoint: ${langfuse_url}/api/public/otel
+    headers:
+      Authorization: "Basic $(echo -n '${langfuse_public_key}:${langfuse_secret_key}' | base64)"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+OTELEOF
+
 log "7/12 Create config files"
 cat > .env <<EOF
 WEBUI_SECRET_KEY=$(openssl rand -hex 32)
@@ -154,10 +295,10 @@ ENABLE_OAUTH_ROLE_MANAGEMENT=true
 OAUTH_ROLES_CLAIM=roles
 OAUTH_ALLOWED_ROLES=user,admin
 OAUTH_ADMIN_ROLES=admin
+ENABLE_WEBSOCKET_SUPPORT=false
 EOF
 
 cat > docker-compose.yml <<'DCOMPOSE'
-version: '3.8'
 services:
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -166,10 +307,14 @@ services:
     ports: ["8080:8080"]
     volumes: [open-webui-data:/app/backend/data]
     env_file: [.env]
-    depends_on: [pipelines]
+    depends_on: [pipelines, otel-collector]
     environment:
       - OPENAI_API_BASE_URL=http://pipelines:9099
       - OPENAI_API_KEY=0p3n-w3bu!
+      # OpenTelemetry for Langfuse tracing
+      - ENABLE_OTEL=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=open-webui
 
   pipelines:
     image: ghcr.io/open-webui/pipelines:main
@@ -181,6 +326,18 @@ services:
       - pipelines-data:/app/data
     environment:
       - PIPELINES_DIR=/app/pipelines
+
+  # OTEL Collector - bridges gRPC to HTTP for Langfuse
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    restart: always
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
 
 volumes:
   open-webui-data:
@@ -339,4 +496,5 @@ PYEOF
 log "12/12 Done"
 log "✅ COMPLETE - ${open_webui_url}"
 log "Pipelines: Detoxify, LLM-Guard, Turn Limit (${max_conversation_turns} turns)"
+log "OTEL Tracing: Enabled → Langfuse via OTEL Collector"
 log "Admin: Admin / (AD password), Test: testuser / Welcome@2024"

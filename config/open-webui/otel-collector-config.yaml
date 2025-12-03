@@ -1,0 +1,41 @@
+# OpenTelemetry Collector Configuration
+# Bridges gRPC OTEL from Open WebUI to Langfuse HTTP endpoint
+#
+# Deploy alongside Open WebUI to collect traces and send to Langfuse
+# The Authorization header uses Base64 encoded credentials: public_key:secret_key
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  otlphttp:
+    # Langfuse OTEL endpoint - replace with your Langfuse URL
+    endpoint: ${LANGFUSE_OTEL_ENDPOINT:-https://langfuse.openwebui.demos.apps.equal.expert/api/public/otel}
+    headers:
+      # Base64 encoded: lf_pk_aiportal_openwebui:lf_sk_aiportal_openwebui_secret
+      Authorization: "Basic ${LANGFUSE_OTEL_AUTH:-bGZfcGtfYWlwb3J0YWxfb3BlbndlYnVpOmxmX3NrX2FpcG9ydGFsX29wZW53ZWJ1aV9zZWNyZXQ=}"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]

@@ -117,3 +117,27 @@ variable "max_conversation_turns" {
   type        = number
   default     = 10
 }
+
+variable "langfuse_subdomain" {
+  description = "Subdomain for Langfuse"
+  type        = string
+  default     = "langfuse"
+}
+
+variable "langfuse_instance_type" {
+  description = "Instance type for Langfuse EC2"
+  type        = string
+  default     = "t3.medium"
+}
+
+variable "langfuse_public_key" {
+  description = "Langfuse project public API key for Open WebUI integration"
+  type        = string
+  default     = "lf_pk_aiportal_openwebui"
+}
+
+variable "langfuse_secret_key" {
+  description = "Langfuse project secret API key for Open WebUI integration"
+  type        = string
+  sensitive   = true
+}

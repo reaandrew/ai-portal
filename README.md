@@ -22,7 +22,7 @@ Complete Terraform infrastructure for AI Portal on AWS with Open WebUI, AWS Bedr
 
 ### ✅ REQUIRED Files (In This Directory)
 
-**These 8 files are ALL you need to deploy:**
+**These 9 files are ALL you need to deploy:**
 
 ```
 main.tf                          # Infrastructure definition
@@ -31,6 +31,7 @@ outputs.tf                       # Output values
 userdata_keycloak.sh            # Keycloak EC2 bootstrap (referenced in main.tf)
 userdata_open_webui.sh          # Open WebUI EC2 bootstrap (referenced in main.tf)
 userdata_bedrock_gateway.sh     # Bedrock Gateway EC2 bootstrap (referenced in main.tf)
+userdata_langfuse.sh            # Langfuse EC2 bootstrap (referenced in main.tf)
 sync_models.sh                   # Sync Bedrock models to Open WebUI (run after deploy)
 terraform.tfvars                 # Your passwords & config (stored in AWS SSM)
 terraform.tfvars.example         # Template for tfvars
@@ -55,12 +56,13 @@ terraform.tfvars.example         # Template for tfvars
 ## 🏗️ Infrastructure Overview
 
 **Components:**
-- **3x EC2 Instances** - Open WebUI (t3.large), Keycloak (t3.small), Bedrock Gateway (t3.large)
-- **RDS PostgreSQL (db.t3.medium)** - Shared database (2 databases: `aiportal`, `keycloak`)
+- **4x EC2 Instances** - Open WebUI (t3.large), Keycloak (t3.small), Bedrock Gateway (t3.large), Langfuse (t3.medium)
+- **RDS PostgreSQL (db.t3.medium)** - Shared database (3 databases: `aiportal`, `keycloak`, `langfuse`)
 - **AWS Managed Microsoft AD** - Active Directory for user authentication
 - **Keycloak (Docker)** - Identity Provider with LDAP federation
+- **Langfuse (Docker)** - LLM Observability and tracing
 - **Application Load Balancer** - TLS 1.3 termination with host-based routing
-- **ACM Certificate** - SSL/TLS for both subdomains (ai.forora.com, auth.forora.com)
+- **ACM Certificate** - SSL/TLS for all subdomains
 - **VPC with public/private subnets** - Network isolation
 - **NAT Gateway** - Outbound internet for private resources
 - **Security Groups** - Network access control
@@ -69,8 +71,40 @@ terraform.tfvars.example         # Template for tfvars
 **Access:**
 - **Open WebUI:** https://ai.forora.com (TLS 1.3, HTTPS only)
 - **Keycloak Admin:** https://auth.forora.com/admin
+- **Langfuse:** https://langfuse.forora.com (LLM Observability)
 
 **Cost:** ~£1.90/hour (~£46/day) + Bedrock token usage
+
+---
+
+## 🛡️ Pipeline Filters (Security & Observability)
+
+Open WebUI includes four automated pipeline filters that intercept all LLM requests:
+
+| Filter | Priority | Function | Applies To |
+|--------|----------|----------|------------|
+| **Detoxify Filter** | 0 | Blocks toxic/harmful messages using ML model | All models |
+| **LLM-Guard Filter** | 1 | Detects and blocks prompt injection attacks | All models |
+| **Turn Limit Filter** | 2 | Limits conversation turns (default: 10) | All users (user + admin roles) |
+| **Langfuse Filter** | 0 | LLM observability with token usage tracking | All models |
+
+### Critical Configuration Notes
+
+**⚠️ IMPORTANT: Valves `pipelines` Class Default**
+
+All filter pipelines MUST have `pipelines: List[str] = ["*"]` as the **class default** in the Valves definition:
+
+```python
+class Pipeline:
+    class Valves(BaseModel):
+        pipelines: List[str] = ["*"]  # MUST be ["*"] - NOT []
+```
+
+If `pipelines` is empty `[]`, the filter will **never be invoked**. This is a common gotcha when copying pipeline examples.
+
+**WebSocket Support Disabled**
+
+WebSocket support is disabled (`ENABLE_WEBSOCKET_SUPPORT=false`) for compatibility with some load balancer configurations. The UI uses HTTP polling instead.
 
 ---
 
@@ -729,6 +763,181 @@ If all checked, you can safely `terraform destroy` and rebuild anytime!
 
 ---
 
+## 📊 Langfuse LLM Observability (v3)
+
+### Overview
+
+Langfuse v3 provides comprehensive observability for all LLM interactions in Open WebUI, including **token usage tracking and cost analytics**. Every conversation is automatically traced and visible in the Langfuse dashboard.
+
+**URL:** https://langfuse.forora.com (or your configured subdomain)
+
+### What's Automated
+
+The entire Langfuse integration is **fully automated** during deployment:
+
+1. **Langfuse Server v3** - Deployed with Docker, ClickHouse, Redis, and MinIO
+2. **PostgreSQL** - Shared RDS database for metadata
+3. **ClickHouse** - Analytics database for traces and observations
+4. **MinIO** - S3-compatible object storage for events and media
+5. **Keycloak SSO** - Native Keycloak authentication (same AD credentials as Open WebUI)
+6. **Organization & Project** - Auto-created via headless initialization
+7. **API Keys** - Pre-generated and configured in Open WebUI pipeline
+8. **Tracing Pipeline** - Pre-configured filter sends all LLM calls to Langfuse with token counts
+
+### Key Version Requirements
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| **Langfuse Server** | `3.x` | V3 with ClickHouse for analytics |
+| **Langfuse Worker** | `3.x` | Background job processing |
+| **Langfuse Python SDK** | `>=3.0.0` | V3 SDK with span-based API |
+| **ClickHouse** | `latest` | Analytics database |
+| **Redis** | `7` | Cache and queue |
+| **MinIO** | `latest` | S3-compatible storage |
+
+### Architecture
+
+```
+User → Open WebUI → Pipelines Filter → Langfuse API
+                         ↓
+                   langfuse>=3.0.0
+                         ↓
+              Langfuse Server (v3)
+                    ↓      ↓      ↓
+              PostgreSQL  ClickHouse  MinIO
+                  (RDS)    (traces)   (events)
+```
+
+### Configuration Files
+
+All configuration files are in the `config/` directory:
+
+```
+config/
+├── langfuse/
+│   ├── docker-compose.yml     # Langfuse v3 with all dependencies
+│   └── .env.example           # Environment variable template
+├── open-webui/
+│   ├── docker-compose.yml     # Open WebUI with pipelines + OTEL
+│   └── otel-collector-config.yaml  # OTEL collector config
+└── pipelines/
+    └── langfuse_filter.py     # Langfuse v3 filter pipeline
+```
+
+### Langfuse Server Configuration
+
+**Docker Compose Services:**
+- `langfuse-web` - Main application (port 3000)
+- `langfuse-worker` - Background job processing
+- `clickhouse` - Analytics database
+- `redis` - Cache and queue
+- `minio` - Object storage
+
+**Key Environment Variables:**
+```bash
+# Database
+DATABASE_URL=postgresql://user:pass@host:5432/langfuse?sslmode=require
+
+# ClickHouse
+CLICKHOUSE_URL=http://clickhouse:8123
+CLICKHOUSE_PASSWORD=<generated>
+
+# Redis
+REDIS_HOST=redis
+REDIS_AUTH=<generated>
+
+# MinIO/S3
+LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT=http://minio:9000
+LANGFUSE_S3_EVENT_UPLOAD_BUCKET=langfuse
+
+# Keycloak SSO
+AUTH_KEYCLOAK_CLIENT_ID=langfuse
+AUTH_KEYCLOAK_ISSUER=https://auth.forora.com/realms/aiportal
+
+# Headless initialization
+LANGFUSE_INIT_PROJECT_PUBLIC_KEY=lf_pk_aiportal_openwebui
+LANGFUSE_INIT_PROJECT_SECRET_KEY=lf_sk_aiportal_openwebui_secret
+```
+
+### Open WebUI Pipeline Filter
+
+The filter is located at: `config/pipelines/langfuse_filter.py`
+
+**Critical Configuration in Valves class:**
+```python
+class Valves(BaseModel):
+    pipelines: List[str] = ["*"]  # MUST be ["*"] not [] for filter to apply
+    priority: int = 0
+    secret_key: str
+    public_key: str
+    host: str
+```
+
+**IMPORTANT:** The `pipelines` class default MUST be `["*"]` for the filter to be invoked. An empty list `[]` will cause the filter to never be called.
+
+### What Gets Traced
+
+Each conversation trace includes:
+- **User ID** - Who made the request
+- **Email** - User's email address
+- **Model** - Which Bedrock model was used
+- **Input** - User's message
+- **Output** - LLM response
+- **Token Usage** - Input and output token counts
+- **Duration** - Response time
+- **Chat ID** - Conversation identifier
+- **Cost** - Estimated cost based on token usage
+
+### Accessing Langfuse
+
+1. Go to https://langfuse.forora.com
+2. Click **"Keycloak"** button to login via SSO
+3. Use your AD credentials (same as Open WebUI)
+4. Navigate to **Traces** to see all LLM interactions
+5. View **Analytics** for token usage and cost dashboards
+
+### Troubleshooting
+
+**No traces appearing:**
+```bash
+# Check pipeline logs
+ssh ec2-user@$(terraform output -raw open_webui_public_ip)
+sudo docker logs pipelines 2>&1 | grep -i langfuse
+
+# Should see:
+# [DEBUG] Langfuse Filter INLET called
+# [DEBUG] Langfuse Filter OUTLET called
+# [DEBUG] LLM generation completed for chat_id: xxx
+```
+
+**Filter not being invoked:**
+```bash
+# Check the Valves class default - MUST have pipelines: ["*"]
+# If empty [], the filter will never be called!
+# Fix: Edit config/pipelines/langfuse_filter.py line 31:
+#   pipelines: List[str] = ["*"]  # NOT []
+
+# After fixing, restart pipelines container
+sudo docker-compose restart pipelines
+```
+
+**Check Langfuse server logs:**
+```bash
+ssh ec2-user@$(terraform output -raw langfuse_public_ip)
+sudo docker logs langfuse-web 2>&1 | tail -50
+sudo docker logs langfuse-worker 2>&1 | tail -50
+```
+
+### Lessons Learned (Updated for v3)
+
+1. **Langfuse V3 requires ClickHouse** - PostgreSQL alone is no longer sufficient for v3
+2. **Pipelines Valves class default matters** - The `pipelines` field must have `["*"]` as the CLASS default, not just in `__init__`
+3. **V3 SDK uses span-based API** - `start_span()`, `start_generation()` instead of v2's `trace()`
+4. **Flush after each trace** - Call `langfuse.flush()` in outlet to ensure traces are sent
+5. **MinIO required for events** - Langfuse v3 stores event data in S3-compatible storage
+
+---
+
 ## 🤖 Client Integrations
 
 ### Aider (AI Pair Programmer)
@@ -776,10 +985,36 @@ Currently, streaming responses do not work correctly with Aider (requires `--no-
 
 ---
 
-**Version:** 2.0
-**Last Updated:** 2025-11-18
+## 📁 Reference Configuration Files
+
+The `config/` directory contains reference configurations that can be used for manual deployment or as templates:
+
+```
+config/
+├── langfuse/
+│   ├── docker-compose.yml      # Langfuse v3 with ClickHouse, Redis, MinIO
+│   └── .env.example            # Environment variable template
+├── open-webui/
+│   ├── docker-compose.yml      # Open WebUI with pipelines + OTEL collector
+│   └── otel-collector-config.yaml   # OTEL collector for Langfuse
+└── pipelines/
+    ├── langfuse_filter.py      # Langfuse v3 filter (token usage tracking)
+    └── turn_limit_filter.py    # Turn limit filter (user + admin roles)
+```
+
+These are **reference files only** - the actual deployment uses the embedded configurations in `userdata_*.sh` scripts.
+
+---
+
+**Version:** 4.0
+**Last Updated:** 2025-12-03
 **Terraform:** >= 1.0
 **AWS Provider:** ~> 5.0
 **Open WebUI:** ghcr.io/open-webui/open-webui:main
 **Keycloak:** quay.io/keycloak/keycloak:26.0
+**Langfuse Server:** langfuse/langfuse:3 (with ClickHouse, Redis, MinIO)
+**Langfuse SDK:** langfuse>=3.0.0
+**Pipeline Filters:** Detoxify, LLM-Guard, Turn Limit, Langfuse (all with `pipelines: ["*"]`)
+**WebSocket:** Disabled (`ENABLE_WEBSOCKET_SUPPORT=false`)
 **Authentication:** Keycloak SSO with OIDC + LDAP federation to Active Directory
+**Observability:** Langfuse v3 with token usage tracking, cost analytics, and auto-provisioned organization/project/API keys

@@ -1,0 +1,51 @@
+# Open WebUI Docker Compose with Pipelines and OTEL Collector
+# This configuration includes Langfuse integration via the pipelines filter
+version: '3.8'
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: always
+    ports: ["8080:8080"]
+    volumes: [open-webui-data:/app/backend/data]
+    env_file: [.env]
+    depends_on: [pipelines, otel-collector]
+    environment:
+      - OPENAI_API_BASE_URL=http://pipelines:9099
+      - OPENAI_API_KEY=0p3n-w3bu!
+      # OpenTelemetry configuration (optional - for native OTEL tracing)
+      - ENABLE_OTEL=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=open-webui
+
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    container_name: pipelines
+    restart: always
+    ports: ["9099:9099"]
+    volumes:
+      - ./pipelines:/app/pipelines
+      - pipelines-data:/app/data
+    environment:
+      - PIPELINES_DIR=/app/pipelines
+      # Langfuse configuration for the filter pipeline
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-lf_sk_aiportal_openwebui_secret}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-lf_pk_aiportal_openwebui}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://langfuse.openwebui.demos.apps.equal.expert}
+      - DEBUG_MODE=${DEBUG_MODE:-false}
+
+  # OTEL Collector - bridges gRPC to HTTP for Langfuse
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    restart: always
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # gRPC receiver
+      - "127.0.0.1:4318:4318"   # HTTP receiver
+
+volumes:
+  open-webui-data:
+  pipelines-data:

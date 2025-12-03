@@ -94,9 +94,13 @@ AD_IP=$(echo "${ad_server}" | cut -d',' -f1)
 curl -s -X POST "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"active-directory","providerId":"ldap","providerType":"org.keycloak.storage.UserStorageProvider","config":{"enabled":["true"],"vendor":["ad"],"usernameLDAPAttribute":["sAMAccountName"],"rdnLDAPAttribute":["cn"],"uuidLDAPAttribute":["objectGUID"],"userObjectClasses":["person,organizationalPerson,user"],"connectionUrl":["ldap://'$AD_IP'"],"usersDn":["${ad_base_dn}"],"authType":["simple"],"bindDn":["${ad_bind_dn}"],"bindCredential":["${ad_bind_password}"],"searchScope":["2"],"editMode":["READ_ONLY"]}}' || true
 
-# Create OIDC client
+# Create OIDC client for Open WebUI
 curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"clientId":"openwebui","enabled":true,"clientAuthenticatorType":"client-secret","secret":"openwebui-secret-change-this","redirectUris":["${openwebui_url}/*"],"webOrigins":["${openwebui_url}","+"],"protocol":"openid-connect","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":true}' || true
+
+# Create OIDC client for Langfuse
+curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"clientId":"langfuse","enabled":true,"clientAuthenticatorType":"client-secret","secret":"langfuse-secret-change-this","redirectUris":["${langfuse_url}/*"],"webOrigins":["${langfuse_url}","+"],"protocol":"openid-connect","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":true}' || true
 
 # Create realm roles for Open WebUI role management
 curl -s -X POST "$KC/admin/realms/aiportal/roles" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \

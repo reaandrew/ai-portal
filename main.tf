@@ -286,6 +286,17 @@ resource "aws_security_group" "rds" {
   }
 }
 
+# Add Langfuse access to RDS (must be separate rule due to dependency order)
+resource "aws_security_group_rule" "rds_from_langfuse" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.langfuse.id
+  security_group_id        = aws_security_group.rds.id
+  description              = "PostgreSQL from Langfuse"
+}
+
 # Security Group for Microsoft AD
 resource "aws_security_group" "ad" {
   name        = "${var.project_name}-ad-sg"
@@ -525,20 +536,23 @@ resource "aws_instance" "open_webui" {
   }
 
   user_data = templatefile("${path.module}/userdata_open_webui.sh", {
-    db_host                = aws_db_instance.postgres.address
-    db_name                = var.db_name
-    db_user                = var.db_username
-    db_password            = var.db_password
-    bedrock_gateway        = aws_instance.bedrock_gateway.private_ip
-    ad_dns_ips             = join(",", aws_directory_service_directory.main.dns_ip_addresses)
-    ad_domain              = var.ad_domain_name
-    ad_admin_password      = var.ad_admin_password
-    ad_directory_id        = aws_directory_service_directory.main.id
-    aws_region             = var.aws_region
+    db_host                 = aws_db_instance.postgres.address
+    db_name                 = var.db_name
+    db_user                 = var.db_username
+    db_password             = var.db_password
+    bedrock_gateway         = aws_instance.bedrock_gateway.private_ip
+    ad_dns_ips              = join(",", aws_directory_service_directory.main.dns_ip_addresses)
+    ad_domain               = var.ad_domain_name
+    ad_admin_password       = var.ad_admin_password
+    ad_directory_id         = aws_directory_service_directory.main.id
+    aws_region              = var.aws_region
     keycloak_url            = "https://${var.keycloak_subdomain}.${var.domain_name}"
     open_webui_url          = "https://${var.subdomain}.${var.domain_name}"
     max_conversation_turns  = var.max_conversation_turns
     keycloak_admin_password = var.ad_admin_password
+    langfuse_url            = "https://${var.langfuse_subdomain}.${var.domain_name}"
+    langfuse_public_key     = var.langfuse_public_key
+    langfuse_secret_key     = var.langfuse_secret_key
   })
 
   tags = {
@@ -642,6 +656,7 @@ resource "aws_instance" "keycloak" {
     keycloak_subdomain      = var.keycloak_subdomain
     domain_name             = var.domain_name
     openwebui_url           = "https://${var.subdomain}.${var.domain_name}"
+    langfuse_url            = "https://${var.langfuse_subdomain}.${var.domain_name}"
   })
 
   tags = {
@@ -657,10 +672,13 @@ data "aws_route53_zone" "main" {
   private_zone = false
 }
 
-# ACM Certificate for subdomains (ai.forora.com and auth.forora.com)
+# ACM Certificate for subdomains (portal, auth, langfuse)
 resource "aws_acm_certificate" "ai_portal" {
   domain_name       = "${var.subdomain}.${var.domain_name}"
-  subject_alternative_names = ["${var.keycloak_subdomain}.${var.domain_name}"]
+  subject_alternative_names = [
+    "${var.keycloak_subdomain}.${var.domain_name}",
+    "${var.langfuse_subdomain}.${var.domain_name}"
+  ]
   validation_method = "DNS"
 
   lifecycle {
@@ -920,6 +938,157 @@ resource "aws_route53_record" "ai_portal" {
 resource "aws_route53_record" "keycloak" {
   zone_id = data.aws_route53_zone.main.zone_id
   name    = "${var.keycloak_subdomain}.${var.domain_name}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.main.dns_name
+    zone_id                = aws_lb.main.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# ==========================================
+# LANGFUSE - LLM Observability Platform
+# ==========================================
+
+# Security Group for Langfuse
+resource "aws_security_group" "langfuse" {
+  name        = "${var.project_name}-langfuse-sg"
+  description = "Allow traffic to Langfuse"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "HTTP from ALB"
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+  }
+
+  # Allow Open WebUI to send traces to Langfuse
+  ingress {
+    description     = "Langfuse API from Open WebUI"
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.open_webui.id]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-langfuse-sg"
+  }
+}
+
+# EC2 Instance - Langfuse
+resource "aws_instance" "langfuse" {
+  ami                    = data.aws_ami.amazon_linux_2023.id
+  instance_type          = var.langfuse_instance_type
+  subnet_id              = aws_subnet.public[0].id
+  vpc_security_group_ids = [aws_security_group.langfuse.id]
+  iam_instance_profile   = aws_iam_instance_profile.bedrock_access.name
+  key_name               = aws_key_pair.main.key_name
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = templatefile("${path.module}/userdata_langfuse.sh", {
+    db_endpoint                = split(":", aws_db_instance.postgres.endpoint)[0]
+    db_port                    = aws_db_instance.postgres.port
+    db_admin_database          = "postgres"
+    db_name                    = "langfuse"
+    db_username                = var.db_username
+    db_password                = var.db_password
+    langfuse_url               = "https://${var.langfuse_subdomain}.${var.domain_name}"
+    keycloak_url               = "https://${var.keycloak_subdomain}.${var.domain_name}"
+    langfuse_public_key        = var.langfuse_public_key
+    langfuse_secret_key        = var.langfuse_secret_key
+    langfuse_init_user_password = var.ad_admin_password
+  })
+
+  tags = {
+    Name = "${var.project_name}-langfuse"
+  }
+
+  depends_on = [aws_db_instance.postgres, aws_nat_gateway.main]
+}
+
+# Target Group for Langfuse
+resource "aws_lb_target_group" "langfuse" {
+  name     = "${var.project_name}-langfuse-tg"
+  port     = 3000
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/api/public/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+    unhealthy_threshold = 3
+  }
+
+  stickiness {
+    type            = "lb_cookie"
+    cookie_duration = 86400
+    enabled         = true
+  }
+
+  tags = {
+    Name = "${var.project_name}-langfuse-tg"
+  }
+}
+
+# Attach Langfuse instance to target group
+resource "aws_lb_target_group_attachment" "langfuse" {
+  target_group_arn = aws_lb_target_group.langfuse.arn
+  target_id        = aws_instance.langfuse.id
+  port             = 3000
+}
+
+# Listener Rule for Langfuse
+resource "aws_lb_listener_rule" "langfuse" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 102
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.langfuse.arn
+  }
+
+  condition {
+    host_header {
+      values = ["${var.langfuse_subdomain}.${var.domain_name}"]
+    }
+  }
+}
+
+# Route53 A record for Langfuse subdomain
+resource "aws_route53_record" "langfuse" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = "${var.langfuse_subdomain}.${var.domain_name}"
   type    = "A"
 
   alias {

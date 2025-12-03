@@ -1,0 +1,165 @@
+# Langfuse v3 with ClickHouse, Redis, and MinIO
+# Requires: PostgreSQL database (external RDS), environment variables for secrets
+#
+# Environment variables required (set in .env file):
+#   DATABASE_URL - PostgreSQL connection string
+#   NEXTAUTH_SECRET - Generate with: openssl rand -base64 32
+#   SALT - Generate with: openssl rand -base64 16
+#   ENCRYPTION_KEY - Generate with: openssl rand -hex 32
+#   CLICKHOUSE_PASSWORD - Generate with: openssl rand -base64 16 | tr -dc "a-zA-Z0-9"
+#   REDIS_AUTH - Generate with: openssl rand -base64 16 | tr -dc "a-zA-Z0-9"
+#   MINIO_PASSWORD - Generate with: openssl rand -base64 16 | tr -dc "a-zA-Z0-9"
+#   LANGFUSE_INIT_PASSWORD - Password for initial admin user
+
+services:
+  # ClickHouse - Analytics database for traces and observations
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server
+    container_name: langfuse-clickhouse
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  # MinIO - S3-compatible object storage for events and media
+  minio:
+    image: cgr.dev/chainguard/minio
+    container_name: langfuse-minio
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address :9000 --console-address :9001 /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+    ports:
+      - "9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  # Redis - Cache and queue for async processing
+  redis:
+    image: docker.io/redis:7
+    container_name: langfuse-redis
+    restart: always
+    command: --requirepass ${REDIS_AUTH} --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_AUTH}", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  # Langfuse Worker - Background job processing
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    container_name: langfuse-worker
+    restart: always
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment: &langfuse-env
+      # Database - using external RDS PostgreSQL
+      DATABASE_URL: ${DATABASE_URL}
+      # ClickHouse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH}
+      REDIS_TLS_ENABLED: "false"
+      # MinIO/S3 - Event storage
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      # MinIO/S3 - Media storage
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      # Core settings
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://langfuse.example.com}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      SALT: ${SALT}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+
+  # Langfuse Web - Main application
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3
+    container_name: langfuse-web
+    restart: always
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      langfuse-worker:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *langfuse-env
+      # Authentication - Keycloak SSO (optional, remove if using local auth)
+      AUTH_DISABLE_USERNAME_PASSWORD: ${AUTH_DISABLE_USERNAME_PASSWORD:-false}
+      AUTH_DISABLE_SIGNUP: ${AUTH_DISABLE_SIGNUP:-false}
+      AUTH_KEYCLOAK_CLIENT_ID: ${AUTH_KEYCLOAK_CLIENT_ID:-}
+      AUTH_KEYCLOAK_CLIENT_SECRET: ${AUTH_KEYCLOAK_CLIENT_SECRET:-}
+      AUTH_KEYCLOAK_ISSUER: ${AUTH_KEYCLOAK_ISSUER:-}
+      AUTH_KEYCLOAK_ALLOW_ACCOUNT_LINKING: ${AUTH_KEYCLOAK_ALLOW_ACCOUNT_LINKING:-true}
+      # Headless initialization - auto-create org, project, and API keys
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-aiportal}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-AI Portal}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-openwebui}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Open WebUI}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-lf_pk_aiportal_openwebui}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-lf_sk_aiportal_openwebui_secret}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_PASSWORD}
+
+volumes:
+  clickhouse_data:
+  clickhouse_logs:
+  minio_data:
