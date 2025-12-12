@@ -1005,7 +1005,7 @@ resource "aws_instance" "langfuse" {
   key_name               = aws_key_pair.main.key_name
 
   root_block_device {
-    volume_size = 30
+    volume_size = 60  # Increased from 30GB to handle ClickHouse data growth
     volume_type = "gp3"
     encrypted   = true
   }
