@@ -1,0 +1,20 @@
+# AD Users and Groups Configuration
+# Generated from users.txt - do not edit directly
+# Username: firstname.surname (lowercase)
+# Email: firstname.surname@corp.aiportal.local
+# Password: TestOpenWebUI123@ (all users)
+# Role: user (all users)
+
+groups:
+  - ACME
+
+users:
+  - first_name: John
+    surname: Smith
+    groups:
+      - ACME
+
+  - first_name: Jane
+    surname: Doe
+    groups:
+      - ACME

@@ -34,6 +34,67 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+# Data source for current AWS account
+data "aws_caller_identity" "current" {}
+
+# S3 bucket for provisioning scripts (to bypass 16KB userdata limit)
+resource "aws_s3_bucket" "scripts" {
+  bucket = "${var.project_name}-scripts-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Name = "${var.project_name}-scripts"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "scripts" {
+  bucket = aws_s3_bucket.scripts.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Full Open WebUI provisioning script stored in S3
+resource "aws_s3_object" "open_webui_provision_script" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "provision_open_webui.sh"
+  content = templatefile("${path.module}/userdata_open_webui.sh", {
+    db_host                 = aws_db_instance.postgres.address
+    db_name                 = var.db_name
+    db_user                 = var.db_username
+    db_password             = var.db_password
+    bedrock_gateway         = aws_instance.bedrock_gateway.private_ip
+    ad_dns_ips              = join(",", aws_directory_service_directory.main.dns_ip_addresses)
+    ad_domain               = var.ad_domain_name
+    ad_admin_password       = var.ad_admin_password
+    ad_directory_id         = aws_directory_service_directory.main.id
+    aws_region              = var.aws_region
+    keycloak_url            = "https://${var.keycloak_subdomain}.${var.domain_name}"
+    open_webui_url          = "https://${var.subdomain}.${var.domain_name}"
+    max_conversation_turns  = var.max_conversation_turns
+    keycloak_admin_password = var.ad_admin_password
+    langfuse_url            = "https://${var.langfuse_subdomain}.${var.domain_name}"
+    langfuse_public_key     = var.langfuse_public_key
+    langfuse_secret_key     = var.langfuse_secret_key
+    s3_bucket               = aws_s3_bucket.scripts.id
+  })
+
+  tags = {
+    Name = "Open WebUI provisioning script"
+  }
+}
+
+# AD users configuration stored in S3
+resource "aws_s3_object" "ad_users_config" {
+  bucket = aws_s3_bucket.scripts.id
+  key    = "ad_users.yaml"
+  source = "${path.module}/config/ad/users.yaml"
+  etag   = filemd5("${path.module}/config/ad/users.yaml")
+
+  tags = {
+    Name = "AD users configuration"
+  }
+}
+
 # VPC
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
@@ -427,6 +488,17 @@ resource "aws_iam_role_policy" "bedrock_access" {
           "ds-data:DescribeUser"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.scripts.arn,
+          "${aws_s3_bucket.scripts.arn}/*"
+        ]
       }
     ]
   })
@@ -535,31 +607,22 @@ resource "aws_instance" "open_webui" {
     encrypted   = true
   }
 
-  user_data = templatefile("${path.module}/userdata_open_webui.sh", {
-    db_host                 = aws_db_instance.postgres.address
-    db_name                 = var.db_name
-    db_user                 = var.db_username
-    db_password             = var.db_password
-    bedrock_gateway         = aws_instance.bedrock_gateway.private_ip
-    ad_dns_ips              = join(",", aws_directory_service_directory.main.dns_ip_addresses)
-    ad_domain               = var.ad_domain_name
-    ad_admin_password       = var.ad_admin_password
-    ad_directory_id         = aws_directory_service_directory.main.id
-    aws_region              = var.aws_region
-    keycloak_url            = "https://${var.keycloak_subdomain}.${var.domain_name}"
-    open_webui_url          = "https://${var.subdomain}.${var.domain_name}"
-    max_conversation_turns  = var.max_conversation_turns
-    keycloak_admin_password = var.ad_admin_password
-    langfuse_url            = "https://${var.langfuse_subdomain}.${var.domain_name}"
-    langfuse_public_key     = var.langfuse_public_key
-    langfuse_secret_key     = var.langfuse_secret_key
-  })
+  # Minimal bootstrap that downloads and runs the full script from S3
+  user_data = <<-EOF
+#!/bin/bash
+exec > >(tee -a /var/log/provisioning.log) 2>&1
+echo "[BOOTSTRAP] Downloading provisioning script from S3..."
+aws s3 cp s3://${aws_s3_bucket.scripts.id}/provision_open_webui.sh /tmp/provision.sh --region ${var.aws_region}
+chmod +x /tmp/provision.sh
+echo "[BOOTSTRAP] Executing provisioning script..."
+/tmp/provision.sh
+EOF
 
   tags = {
     Name = "${var.project_name}-open-webui"
   }
 
-  depends_on = [aws_db_instance.postgres, aws_nat_gateway.main]
+  depends_on = [aws_db_instance.postgres, aws_nat_gateway.main, aws_s3_object.open_webui_provision_script]
 }
 
 # EC2 Instance - Bedrock Access Gateway

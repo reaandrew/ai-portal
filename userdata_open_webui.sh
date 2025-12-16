@@ -12,7 +12,8 @@ log "1/12 System update"
 yum update -y
 
 log "2/12 Install Docker"
-yum install -y docker postgresql15 jq
+yum install -y docker postgresql15 jq python3-pip
+pip3 install pyyaml
 systemctl start docker && systemctl enable docker
 usermod -aG docker ec2-user
 
@@ -28,6 +29,38 @@ log "5/12 Create app directory"
 mkdir -p /opt/open-webui/pipelines && cd /opt/open-webui
 
 log "6/12 Create pipeline filters"
+# Model name fix filter (strips :latest suffix for Bedrock compatibility)
+cat > pipelines/model_name_fix.py <<'PYEOF'
+"""
+title: Model Name Fix Filter
+description: Strips :latest suffix from model names for Bedrock Gateway compatibility
+"""
+from typing import List, Optional
+from pydantic import BaseModel
+
+class Pipeline:
+    class Valves(BaseModel):
+        pipelines: List[str] = ["*"]
+        priority: int = -1  # Run before all other filters
+
+    def __init__(self):
+        self.type = "filter"
+        self.name = "Model Name Fix"
+        self.valves = self.Valves()
+
+    async def on_startup(self):
+        pass
+
+    async def on_shutdown(self):
+        pass
+
+    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        if "model" in body and body["model"]:
+            # Strip :latest suffix that Open WebUI adds for Ollama compatibility
+            body["model"] = body["model"].replace(":latest", "")
+        return body
+PYEOF
+
 # Detoxify filter
 cat > pipelines/detoxify_filter.py <<'PYEOF'
 """
@@ -79,7 +112,7 @@ class Pipeline:
     class Valves(BaseModel):
         pipelines: List[str] = ["*"]
         priority: int = 1
-        risk_threshold: float = 0.8
+        risk_threshold: float = 0.95
 
     def __init__(self):
         self.type = "filter"
@@ -391,13 +424,72 @@ with engine.connect() as c:
 print(f'Synced {len(models)} models')
 PYEOF
 
-log "11/12 Setup AD users"
+log "11/12 Setup AD users from YAML config"
 aws ds enable-directory-data-access --directory-id "${ad_directory_id}" --region ${aws_region} 2>&1 || true
 sleep 30
 
+# Download AD users config from S3
+aws s3 cp s3://${s3_bucket}/ad_users.yaml /tmp/ad_users.yaml --region ${aws_region}
+
+# Setup Admin user (always exists with admin password)
 aws ds-data create-user --directory-id "${ad_directory_id}" --sam-account-name Admin --given-name Admin --surname User --email-address "admin@corp.aiportal.local" --region ${aws_region} 2>&1 || true
 aws ds-data update-user --directory-id "${ad_directory_id}" --sam-account-name Admin --email-address "admin@corp.aiportal.local" --region ${aws_region} 2>&1 || true
 aws ds reset-user-password --directory-id "${ad_directory_id}" --user-name Admin --new-password "${ad_admin_password}" --region ${aws_region} 2>&1 || true
+
+# Parse YAML and create AD groups and users
+python3 <<'PYEOF'
+import yaml
+import subprocess
+import sys
+
+DIRECTORY_ID = "${ad_directory_id}"
+REGION = "${aws_region}"
+DEFAULT_PASSWORD = "SuperInsecure123@"
+DOMAIN = "corp.aiportal.local"
+
+def run_aws(cmd):
+    """Run AWS CLI command, return True if successful"""
+    try:
+        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        # Ignore "already exists" type errors
+        return False
+
+with open('/tmp/ad_users.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+# Create AD groups
+for group in config.get('groups', []):
+    print(f"Creating AD group: {group}")
+    run_aws(f'aws ds-data create-group --directory-id {DIRECTORY_ID} --sam-account-name "{group}" --region {REGION}')
+
+# Create users
+for user in config.get('users', []):
+    first_name = user['first_name']
+    surname = user['surname']
+    username = f"{first_name.lower()}.{surname.lower()}"
+    email = f"{username}@{DOMAIN}"
+    display_name = f"{first_name} {surname}"
+
+    print(f"Creating AD user: {username} ({email})")
+
+    # Create user
+    run_aws(f'aws ds-data create-user --directory-id {DIRECTORY_ID} --sam-account-name "{username}" --given-name "{first_name}" --surname "{surname}" --email-address "{email}" --region {REGION}')
+
+    # Update user (in case they already exist)
+    run_aws(f'aws ds-data update-user --directory-id {DIRECTORY_ID} --sam-account-name "{username}" --email-address "{email}" --given-name "{first_name}" --surname "{surname}" --region {REGION}')
+
+    # Set password
+    run_aws(f'aws ds reset-user-password --directory-id {DIRECTORY_ID} --user-name "{username}" --new-password "{DEFAULT_PASSWORD}" --region {REGION}')
+
+    # Add to groups
+    for group in user.get('groups', []):
+        print(f"  Adding {username} to group {group}")
+        run_aws(f'aws ds-data add-group-member --directory-id {DIRECTORY_ID} --group-name "{group}" --member-name "{username}" --region {REGION}')
+
+print("AD user setup complete")
+PYEOF
 
 sleep 15
 
@@ -416,7 +508,7 @@ with engine.connect() as c:
     r=c.execute(text("SELECT id FROM user WHERE email='admin@corp.aiportal.local'"))
     if r.fetchone() is None:
         ts=int(datetime.now().timestamp())
-        c.execute(text("INSERT INTO user (id,name,email,role,profile_image_url,created_at,updated_at,last_active_at,api_key,settings,info) VALUES (:id,'Admin','admin@corp.aiportal.local','admin','/user.png',:ts,:ts,:ts,NULL,'{}','{}')"),{'id':str(uuid.uuid4()),'ts':ts})
+        c.execute(text("INSERT INTO user (id,name,email,role,profile_image_url,created_at,updated_at,last_active_at,settings,info) VALUES (:id,'Admin','admin@corp.aiportal.local','admin','/user.png',:ts,:ts,:ts,'{}','{}')"),{'id':str(uuid.uuid4()),'ts':ts})
         print('Admin user pre-seeded with admin role')
     else:
         c.execute(text("UPDATE user SET role='admin' WHERE email='admin@corp.aiportal.local'"))
@@ -424,58 +516,42 @@ with engine.connect() as c:
     c.commit()
 PYEOF
 
-log "Assigning admin role to Admin user in Keycloak"
-# Get Keycloak admin token
-KC_TOKEN=$(curl -sf -X POST "${keycloak_url}/realms/master/protocol/openid-connect/token" \
-  -d "username=admin" -d "password=${keycloak_admin_password}" \
-  -d "grant_type=password" -d "client_id=admin-cli" | jq -r '.access_token') || true
-
-if [ -n "$KC_TOKEN" ] && [ "$KC_TOKEN" != "null" ]; then
-  # Trigger LDAP sync to ensure Admin user exists in Keycloak
-  LDAP_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/components" \
-    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[]|select(.providerId=="ldap")|.id') || true
-  [ -n "$LDAP_ID" ] && curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/user-storage/$LDAP_ID/sync?action=triggerFullSync" \
-    -H "Authorization: Bearer $KC_TOKEN" || true
-  sleep 10
-
-  # Get Admin user ID and admin role ID
-  ADMIN_USER_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/users?username=Admin" \
-    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[0].id') || true
-  ADMIN_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/admin" \
-    -H "Authorization: Bearer $KC_TOKEN") || true
-
-  # Assign admin role to Admin user
-  if [ -n "$ADMIN_USER_ID" ] && [ "$ADMIN_USER_ID" != "null" ] && [ -n "$ADMIN_ROLE" ]; then
-    curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$ADMIN_USER_ID/role-mappings/realm" \
-      -H "Authorization: Bearer $KC_TOKEN" -H "Content-Type: application/json" \
-      -d "[$ADMIN_ROLE]" && log "✅ Admin role assigned to Admin user" || log "⚠️ Failed to assign admin role"
-  else
-    log "⚠️ Could not find Admin user or admin role in Keycloak"
-  fi
-
-  # Assign user role to testuser
-  TEST_USER_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/users?username=testuser" \
-    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[0].id') || true
-  USER_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/user" \
-    -H "Authorization: Bearer $KC_TOKEN") || true
-
-  if [ -n "$TEST_USER_ID" ] && [ "$TEST_USER_ID" != "null" ] && [ -n "$USER_ROLE" ]; then
-    curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$TEST_USER_ID/role-mappings/realm" \
-      -H "Authorization: Bearer $KC_TOKEN" -H "Content-Type: application/json" \
-      -d "[$USER_ROLE]" && log "✅ User role assigned to testuser" || log "⚠️ Failed to assign user role"
-  fi
-else
-  log "⚠️ Could not get Keycloak token for role assignment"
-fi
-
-aws ds-data create-user --directory-id "${ad_directory_id}" --sam-account-name testuser --given-name Test --surname User --email-address "testuser@corp.aiportal.local" --region ${aws_region} 2>&1 || true
-aws ds reset-user-password --directory-id "${ad_directory_id}" --user-name testuser --new-password "Welcome@2024" --region ${aws_region} 2>&1 || true
-
-log "Pre-seeding testuser in Open WebUI database with user role"
-docker exec -i open-webui python3 <<'PYEOF' || log "⚠️ testuser pre-seed failed"
-import os,time,uuid
+log "Pre-seeding users from YAML in Open WebUI database"
+docker exec -i open-webui python3 <<'PYEOF' || log "⚠️ User pre-seed failed"
+import os,time,uuid,yaml
 from datetime import datetime
 os.environ['DATA_DIR']='/app/backend/data'
+
+# Read the YAML config (mounted or copied)
+import subprocess
+result = subprocess.run(['cat', '/tmp/ad_users.yaml'], capture_output=True, text=True)
+if result.returncode != 0:
+    print("Could not read YAML config")
+    exit(0)
+PYEOF
+
+# Pre-seed users using host Python (has access to YAML file)
+python3 <<'PYEOF'
+import yaml
+import subprocess
+
+DOMAIN = "corp.aiportal.local"
+
+with open('/tmp/ad_users.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+for user in config.get('users', []):
+    first_name = user['first_name']
+    surname = user['surname']
+    username = f"{first_name.lower()}.{surname.lower()}"
+    email = f"{username}@{DOMAIN}"
+    display_name = f"{first_name} {surname}"
+
+    # Run pre-seed inside container
+    script = f'''
+import os,time,uuid
+from datetime import datetime
+os.environ["DATA_DIR"]="/app/backend/data"
 for i in range(10):
     try:
         from open_webui.internal.db import engine
@@ -483,18 +559,98 @@ for i in range(10):
         break
     except: time.sleep(2)
 with engine.connect() as c:
-    r=c.execute(text("SELECT id FROM user WHERE email='testuser@corp.aiportal.local'"))
+    r=c.execute(text("SELECT id FROM user WHERE email=:email"),{{"email":"{email}"}})
     if r.fetchone() is None:
         ts=int(datetime.now().timestamp())
-        c.execute(text("INSERT INTO user (id,name,email,role,profile_image_url,created_at,updated_at,last_active_at,api_key,settings,info) VALUES (:id,'Test User','testuser@corp.aiportal.local','user','/user.png',:ts,:ts,:ts,NULL,'{}','{}')"),{'id':str(uuid.uuid4()),'ts':ts})
-        print('testuser pre-seeded with user role')
+        c.execute(text("INSERT INTO user (id,name,email,role,profile_image_url,created_at,updated_at,last_active_at,settings,info) VALUES (:id,:name,:email,\\'user\\',\\'/user.png\\',:ts,:ts,:ts,\\'{{}}\\',\\'{{}}\\')"),{{"id":str(uuid.uuid4()),"name":"{display_name}","email":"{email}","ts":ts}})
+        print(f"Pre-seeded {email} with user role")
     else:
-        print('testuser already exists')
+        print(f"{email} already exists")
     c.commit()
+'''
+    subprocess.run(['docker', 'exec', '-i', 'open-webui', 'python3', '-c', script], capture_output=True)
+    print(f"Pre-seeded: {email}")
+
+print("Open WebUI user pre-seed complete")
 PYEOF
+
+log "Assigning Keycloak roles to users"
+KC_TOKEN=$(curl -sf -X POST "${keycloak_url}/realms/master/protocol/openid-connect/token" \
+  -d "username=admin" -d "password=${keycloak_admin_password}" \
+  -d "grant_type=password" -d "client_id=admin-cli" | jq -r '.access_token') || true
+
+if [ -n "$KC_TOKEN" ] && [ "$KC_TOKEN" != "null" ]; then
+  # Trigger LDAP sync to ensure users exist in Keycloak
+  LDAP_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/components" \
+    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[]|select(.providerId=="ldap")|.id') || true
+  [ -n "$LDAP_ID" ] && curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/user-storage/$LDAP_ID/sync?action=triggerFullSync" \
+    -H "Authorization: Bearer $KC_TOKEN" || true
+  sleep 10
+
+  # Assign admin role to Admin user
+  ADMIN_USER_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/users?username=Admin" \
+    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[0].id') || true
+  ADMIN_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/admin" \
+    -H "Authorization: Bearer $KC_TOKEN") || true
+
+  if [ -n "$ADMIN_USER_ID" ] && [ "$ADMIN_USER_ID" != "null" ] && [ -n "$ADMIN_ROLE" ]; then
+    curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$ADMIN_USER_ID/role-mappings/realm" \
+      -H "Authorization: Bearer $KC_TOKEN" -H "Content-Type: application/json" \
+      -d "[$ADMIN_ROLE]" && log "✅ Admin role assigned to Admin user" || log "⚠️ Failed to assign admin role"
+  fi
+
+  # Get user role for all other users
+  USER_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/user" \
+    -H "Authorization: Bearer $KC_TOKEN") || true
+
+  # Assign user role to all users from YAML
+  python3 <<PYEOF
+import yaml
+import subprocess
+import os
+
+KC_TOKEN = "$KC_TOKEN"
+KC_URL = "${keycloak_url}"
+USER_ROLE = '''$USER_ROLE'''
+
+with open('/tmp/ad_users.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+for user in config.get('users', []):
+    first_name = user['first_name']
+    surname = user['surname']
+    username = f"{first_name.lower()}.{surname.lower()}"
+
+    # Get user ID from Keycloak
+    result = subprocess.run([
+        'curl', '-sf', f'{KC_URL}/admin/realms/aiportal/users?username={username}',
+        '-H', f'Authorization: Bearer {KC_TOKEN}'
+    ], capture_output=True, text=True)
+
+    import json
+    try:
+        users = json.loads(result.stdout)
+        if users and len(users) > 0:
+            user_id = users[0]['id']
+            # Assign user role
+            subprocess.run([
+                'curl', '-sf', '-X', 'POST',
+                f'{KC_URL}/admin/realms/aiportal/users/{user_id}/role-mappings/realm',
+                '-H', f'Authorization: Bearer {KC_TOKEN}',
+                '-H', 'Content-Type: application/json',
+                '-d', f'[{USER_ROLE}]'
+            ], capture_output=True)
+            print(f"Assigned user role to {username}")
+    except:
+        print(f"Could not assign role to {username}")
+PYEOF
+else
+  log "⚠️ Could not get Keycloak token for role assignment"
+fi
 
 log "12/12 Done"
 log "✅ COMPLETE - ${open_webui_url}"
 log "Pipelines: Detoxify, LLM-Guard, Turn Limit (${max_conversation_turns} turns)"
 log "OTEL Tracing: Enabled → Langfuse via OTEL Collector"
-log "Admin: Admin / (AD password), Test: testuser / Welcome@2024"
+log "Admin: Admin / (AD password)"
+log "Users: firstname.surname / TestOpenWebUI123@ (see /tmp/ad_users.yaml)"

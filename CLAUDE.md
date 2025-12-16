@@ -12,18 +12,12 @@ AI Portal is a Terraform-based AWS infrastructure for deploying Open WebUI with 
 
 ```bash
 # Deploy infrastructure (uses aws-vault for credentials)
-aws-vault exec personal -- terraform init
-aws-vault exec personal -- terraform plan
-aws-vault exec personal -- terraform apply
+aws-vault exec <profile> -- terraform init
+aws-vault exec <profile> -- terraform plan -var-file=<profile>.tfvars
+aws-vault exec <profile> -- terraform apply -var-file=<profile>.tfvars
 
 # Destroy infrastructure
-aws-vault exec personal -- terraform destroy
-
-# Get terraform.tfvars from SSM (required before deploy)
-aws-vault exec personal -- aws ssm get-parameter \
-  --name "/com/forora/ai-portal/terraform.tfvars" \
-  --with-decryption --region eu-west-2 \
-  --query 'Parameter.Value' --output text > terraform.tfvars
+aws-vault exec <profile> -- terraform destroy -var-file=<profile>.tfvars
 
 # Sync Bedrock models to Open WebUI database
 ./sync_models.sh
@@ -66,7 +60,7 @@ Databases: Shared RDS PostgreSQL with 3 databases (aiportal, keycloak, langfuse)
 | `outputs.tf` | Output values (IPs, URLs, SSH commands) |
 | `userdata_*.sh` | EC2 bootstrap scripts (embedded configs) |
 | `sync_models.sh` | Sync Bedrock models to Open WebUI DB |
-| `terraform.tfvars` | Secrets (git-ignored, stored in SSM) |
+| `<profile>.tfvars` | Secrets per environment (git-ignored) |
 
 ## Pipeline Filters
 
