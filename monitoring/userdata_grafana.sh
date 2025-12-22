@@ -14,6 +14,11 @@ dnf install -y docker git jq
 systemctl enable docker
 systemctl start docker
 
+# Install Docker Compose
+curl -sL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
+ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+
 # Create data directories
 mkdir -p /opt/monitoring/influxdb-data
 mkdir -p /opt/monitoring/grafana-data
@@ -102,14 +107,17 @@ services:
       - GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP=true
       - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=${keycloak_client_id}
       - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=${keycloak_client_secret}
-      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile roles
+      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile
       - GF_AUTH_GENERIC_OAUTH_AUTH_URL=${keycloak_url}/realms/${keycloak_realm}/protocol/openid-connect/auth
       - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=${keycloak_url}/realms/${keycloak_realm}/protocol/openid-connect/token
       - GF_AUTH_GENERIC_OAUTH_API_URL=${keycloak_url}/realms/${keycloak_realm}/protocol/openid-connect/userinfo
       - GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=contains(realm_access.roles[*], 'admin') && 'Admin' || contains(realm_access.roles[*], 'editor') && 'Editor' || 'Viewer'
       - GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH=email
       - GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH=preferred_username
-      - GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH=name
+      - GF_AUTH_GENERIC_OAUTH_NAME_ATTRIBUTE_PATH=preferred_username
+      - GF_AUTH_GENERIC_OAUTH_GROUPS_ATTRIBUTE_PATH=groups
+      - GF_AUTH_GENERIC_OAUTH_USE_PKCE=true
+      - GF_AUTH_GENERIC_OAUTH_USE_REFRESH_TOKEN=true
 
       # Allow embedding and anonymous for dashboards if needed
       - GF_AUTH_ANONYMOUS_ENABLED=false
@@ -134,32 +142,87 @@ COMPOSE
 
 # Start services
 cd /opt/monitoring
-docker compose up -d
+docker-compose up -d
 
 # Wait for services to be healthy
 echo "Waiting for InfluxDB to be ready..."
 sleep 30
 
-# Download and import the OpenWebUI dashboard
+# Download and import the OpenWebUI dashboard with group filtering
 echo "Downloading OpenWebUI dashboard..."
 mkdir -p /opt/monitoring/grafana-data/dashboards
+chmod 777 /opt/monitoring/grafana-data/dashboards
 
-# Download dashboard JSON
-curl -s "https://grafana.com/api/dashboards/${grafana_dashboard_id}/revisions/1/download" \
-  -o /opt/monitoring/grafana-data/dashboards/openwebui.json || echo "Dashboard download may require manual import"
+# Download official dashboard and add group filtering
+curl -s "https://grafana.com/api/dashboards/${grafana_dashboard_id}/revisions/1/download" -o /tmp/dashboard.json
+
+if [ -s /tmp/dashboard.json ]; then
+  python3 << 'PYSCRIPT'
+import json
+
+with open('/tmp/dashboard.json', 'r') as f:
+    dashboard = json.load(f)
+
+# Add AD group variable for filtering
+group_var = {
+    "name": "user_group",
+    "type": "query",
+    "label": "AD Group",
+    "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+    "query": 'import "influxdata/influxdb/schema"\nschema.tagValues(bucket: "openwebui", tag: "user_group")',
+    "refresh": 1,
+    "includeAll": True,
+    "multi": True,
+    "allValue": ".*",
+    "current": {"text": "All", "value": "$__all"}
+}
+
+if 'templating' not in dashboard:
+    dashboard['templating'] = {'list': []}
+dashboard['templating']['list'].insert(0, group_var)
+
+dashboard['uid'] = 'openwebui-by-group'
+dashboard['title'] = 'OpenWebUI Usage by AD Group'
+
+with open('/opt/monitoring/grafana-data/dashboards/openwebui-groups.json', 'w') as f:
+    json.dump(dashboard, f, indent=2)
+PYSCRIPT
+  echo "Dashboard modified with AD group filter"
+else
+  echo "Dashboard download failed - manual import required"
+fi
 
 # Fix permissions
 chown -R 472:472 /opt/monitoring/grafana-data
 
 # Restart Grafana to pick up dashboard
-docker compose restart grafana
+docker-compose restart grafana
+
+# Wait for Grafana to be ready
+echo "Waiting for Grafana to be ready..."
+for i in {1..30}; do
+  curl -sf http://localhost:3000/api/health >/dev/null 2>&1 && break
+  sleep 2
+done
+
+# Delete local admin user (OAuth admin from Keycloak will be used instead)
+echo "Removing local admin user (Keycloak OAuth admin will be used)..."
+GRAFANA_AUTH="${grafana_admin_user}:${grafana_admin_password}"
+curl -s -X DELETE "http://localhost:3000/api/admin/users/1" -u "$GRAFANA_AUTH" || true
+
+# Create teams for AD groups
+echo "Creating Grafana teams..."
+curl -s -X POST "http://localhost:3000/api/teams" \
+  -u "$GRAFANA_AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"HMRC","email":"hmrc@aiportal.local"}' || true
+curl -s -X POST "http://localhost:3000/api/teams" \
+  -u "$GRAFANA_AUTH" -H "Content-Type: application/json" \
+  -d '{"name":"DEFRA","email":"defra@aiportal.local"}' || true
 
 echo "=== Grafana + InfluxDB Setup Complete ==="
 echo "Grafana URL: ${grafana_url}"
 echo "InfluxDB URL: http://localhost:8086"
+echo "Dashboard: ${grafana_url}/d/openwebui-by-group"
 echo ""
-echo "To send metrics from OpenWebUI, configure Telegraf or use the InfluxDB line protocol:"
-echo "curl -X POST 'http://$(hostname -I | awk '{print $1}'):8086/api/v2/write?org=${influxdb_org}&bucket=${influxdb_bucket}' \\"
-echo "  -H 'Authorization: Token ${influxdb_token}' \\"
-echo "  -H 'Content-Type: text/plain' \\"
-echo "  --data-binary 'openwebui_stats,model=gpt-4 promptTokens=100,responseTokens=50'"
+echo "Note: Metrics are collected from OpenWebUI every 5 minutes"
+echo "Users can filter by AD group (HMRC/DEFRA) in the dashboard"

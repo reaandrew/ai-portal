@@ -89,10 +89,33 @@ TOKEN=$(curl -s -X POST "$KC/realms/master/protocol/openid-connect/token" \
 curl -s -X POST "$KC/admin/realms" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"realm":"aiportal","enabled":true,"displayName":"AI Portal","sslRequired":"external"}' || true
 
-# Configure LDAP
+# Configure LDAP (check if exists first to avoid duplicates on re-provision)
 AD_IP=$(echo "${ad_server}" | cut -d',' -f1)
-curl -s -X POST "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"active-directory","providerId":"ldap","providerType":"org.keycloak.storage.UserStorageProvider","config":{"enabled":["true"],"vendor":["ad"],"usernameLDAPAttribute":["sAMAccountName"],"rdnLDAPAttribute":["cn"],"uuidLDAPAttribute":["objectGUID"],"userObjectClasses":["person,organizationalPerson,user"],"connectionUrl":["ldap://'$AD_IP'"],"usersDn":["${ad_base_dn}"],"authType":["simple"],"bindDn":["${ad_bind_dn}"],"bindCredential":["${ad_bind_password}"],"searchScope":["2"],"editMode":["READ_ONLY"]}}' || true
+EXISTING_LDAP=$(curl -s "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" | jq -r '.[]|select(.providerId=="ldap")|.id' | head -1)
+if [ -z "$EXISTING_LDAP" ] || [ "$EXISTING_LDAP" = "null" ]; then
+  log "Creating LDAP federation"
+  curl -s -X POST "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"name":"active-directory","providerId":"ldap","providerType":"org.keycloak.storage.UserStorageProvider","config":{"enabled":["true"],"vendor":["ad"],"usernameLDAPAttribute":["sAMAccountName"],"rdnLDAPAttribute":["cn"],"uuidLDAPAttribute":["objectGUID"],"userObjectClasses":["person,organizationalPerson,user"],"connectionUrl":["ldap://'$AD_IP'"],"usersDn":["${ad_base_dn}"],"authType":["simple"],"bindDn":["${ad_bind_dn}"],"bindCredential":["${ad_bind_password}"],"searchScope":["2"],"editMode":["READ_ONLY"]}}' || true
+else
+  log "LDAP federation already exists: $EXISTING_LDAP"
+fi
+
+# Get LDAP component ID and add group mapper (check if exists first)
+LDAP_ID=$(curl -s "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" | jq -r '.[]|select(.providerId=="ldap")|.id' | head -1)
+[ -n "$LDAP_ID" ] && [ "$LDAP_ID" != "null" ] && {
+  EXISTING_GROUP_MAPPER=$(curl -s "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" | jq -r '.[]|select(.providerId=="group-ldap-mapper")|.id' | head -1)
+  if [ -z "$EXISTING_GROUP_MAPPER" ] || [ "$EXISTING_GROUP_MAPPER" = "null" ]; then
+    log "Adding LDAP group mapper (LDAP_ID: $LDAP_ID)"
+    curl -s -X POST "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+      -d "{\"name\":\"group-mapper\",\"providerId\":\"group-ldap-mapper\",\"providerType\":\"org.keycloak.storage.ldap.mappers.LDAPStorageMapper\",\"parentId\":\"$LDAP_ID\",\"config\":{\"groups.dn\":[\"OU=Users,OU=corp,${ad_domain_dn}\"],\"group.name.ldap.attribute\":[\"cn\"],\"group.object.classes\":[\"group\"],\"preserve.group.inheritance\":[\"false\"],\"membership.ldap.attribute\":[\"member\"],\"membership.attribute.type\":[\"DN\"],\"membership.user.ldap.attribute\":[\"cn\"],\"mode\":[\"READ_ONLY\"],\"user.roles.retrieve.strategy\":[\"GET_GROUPS_FROM_USER_MEMBEROF_ATTRIBUTE\"],\"memberof.ldap.attribute\":[\"memberOf\"],\"drop.non.existing.groups.during.sync\":[\"false\"]}}" || true
+  else
+    log "LDAP group mapper already exists: $EXISTING_GROUP_MAPPER"
+  fi
+  # Sync groups from LDAP
+  sleep 2
+  GROUP_MAPPER_ID=$(curl -s "$KC/admin/realms/aiportal/components" -H "Authorization: Bearer $TOKEN" | jq -r '.[]|select(.providerId=="group-ldap-mapper")|.id' | head -1)
+  [ -n "$GROUP_MAPPER_ID" ] && curl -s -X POST "$KC/admin/realms/aiportal/user-storage/$LDAP_ID/mappers/$GROUP_MAPPER_ID/sync?direction=fedToKeycloak" -H "Authorization: Bearer $TOKEN" || true
+}
 
 # Create OIDC client for Open WebUI
 curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -101,6 +124,10 @@ curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $T
 # Create OIDC client for Langfuse
 curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"clientId":"langfuse","enabled":true,"clientAuthenticatorType":"client-secret","secret":"langfuse-secret-change-this","redirectUris":["${langfuse_url}/*"],"webOrigins":["${langfuse_url}","+"],"protocol":"openid-connect","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":true}' || true
+
+# Create OIDC client for Grafana
+curl -s -X POST "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"clientId":"grafana","enabled":true,"clientAuthenticatorType":"client-secret","secret":"grafana-secret-change-this","redirectUris":["${grafana_url}/*"],"webOrigins":["${grafana_url}","+"],"protocol":"openid-connect","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":true}' || true
 
 # Create realm roles for Open WebUI role management
 curl -s -X POST "$KC/admin/realms/aiportal/roles" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -116,6 +143,22 @@ CID=$(curl -s "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOK
   # Add realm roles mapper for Open WebUI role management
   curl -s -X POST "$KC/admin/realms/aiportal/clients/$CID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
     -d '{"name":"realm-roles","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper","config":{"claim.name":"roles","jsonType.label":"String","multivalued":"true","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+  # Add groups mapper for Open WebUI group sync
+  curl -s -X POST "$KC/admin/realms/aiportal/clients/$CID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"name":"groups","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper","config":{"claim.name":"groups","full.path":"false","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+}
+
+# Add mappers for Grafana client
+GID=$(curl -s "$KC/admin/realms/aiportal/clients" -H "Authorization: Bearer $TOKEN" | jq -r '.[]|select(.clientId=="grafana")|.id')
+[ -n "$GID" ] && {
+  curl -s -X POST "$KC/admin/realms/aiportal/clients/$GID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"name":"email","protocol":"openid-connect","protocolMapper":"oidc-usermodel-property-mapper","config":{"user.attribute":"email","claim.name":"email","jsonType.label":"String","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+  # Add realm roles mapper for Grafana role management (maps admin role to Grafana Admin)
+  curl -s -X POST "$KC/admin/realms/aiportal/clients/$GID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"name":"realm-roles","protocol":"openid-connect","protocolMapper":"oidc-usermodel-realm-role-mapper","config":{"claim.name":"realm_access.roles","jsonType.label":"String","multivalued":"true","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
+  # Add groups mapper for Grafana (includes AD groups in token)
+  curl -s -X POST "$KC/admin/realms/aiportal/clients/$GID/protocol-mappers/models" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"name":"groups","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper","config":{"claim.name":"groups","full.path":"false","id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}' || true
 }
 
 log "10/10 Verify"

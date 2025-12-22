@@ -37,10 +37,22 @@ from fastapi import FastAPI, HTTPException, Request
 import boto3, os, json
 from datetime import datetime
 
-app = FastAPI(title="Bedrock Gateway", version="3.0.0")
+app = FastAPI(title="Bedrock Gateway", version="3.0.3")
 bedrock_runtime = boto3.client('bedrock-runtime', region_name=os.getenv('AWS_REGION', 'eu-west-2'))
 bedrock_client = boto3.client('bedrock', region_name=os.getenv('AWS_REGION', 'eu-west-2'))
 _cache, _time = None, None
+
+def clean_model_name(model: str) -> str:
+    """Strip :latest suffix that Open WebUI adds for Ollama compatibility"""
+    if model and model.endswith(':latest'):
+        return model[:-7]
+    return model
+
+def add_latest_suffix(model: str) -> str:
+    """Add :latest suffix for Ollama compatibility if no tag present"""
+    if model and ':' not in model:
+        return f"{model}:latest"
+    return model
 
 def get_models():
     global _cache, _time
@@ -50,39 +62,88 @@ def get_models():
         models = []
         for m in r.get('modelSummaries', []):
             if m.get('providerName') == 'DeepSeek': continue
-            if any(p in m['modelId'].lower() for p in ['deepseek','embed','image']): continue
+            if any(p in m['modelId'].lower() for p in ['deepseek','embed','image','qwen']): continue
             it = m.get('inferenceTypesSupported', [])
             if 'CROSS_REGION' in it or 'INFERENCE_PROFILE' in it or 'ON_DEMAND' not in it: continue
             if 'TEXT' in m.get('outputModalities', []):
-                models.append({"name": m['modelId'], "model": m['modelId'], "modified_at": datetime.now().isoformat()+"Z", "size": 0, "digest": m['modelName']})
+                model_id = m['modelId']
+                display_name = add_latest_suffix(model_id)
+                models.append({"name": display_name, "model": display_name, "modified_at": datetime.now().isoformat()+"Z", "size": 0, "digest": m['modelName']})
         _cache, _time = models, datetime.now()
         return models
     except Exception as e:
         return [{"name": "anthropic.claude-3-7-sonnet-20250219-v1:0", "model": "anthropic.claude-3-7-sonnet-20250219-v1:0", "modified_at": "2025-02-19T00:00:00Z", "size": 0, "digest": "claude-3-7-sonnet"}]
 
 @app.get("/health")
-async def health(): return {"status": "healthy", "service": "bedrock-gateway", "version": "3.0.0"}
+async def health(): return {"status": "healthy", "service": "bedrock-gateway", "version": "3.0.3"}
 
 @app.get("/api/tags")
 async def list_models(): return {"models": get_models()}
 
 @app.get("/api/version")
-async def version(): return {"version": "3.0.0"}
+async def version(): return {"version": "3.0.3"}
+
+@app.post("/api/show")
+async def show_model(request: Request):
+    """Ollama-compatible model info endpoint"""
+    data = await request.json()
+    model_name = data.get("name", "")
+    clean_name = clean_model_name(model_name)
+    models = get_models()
+    for m in models:
+        m_clean = clean_model_name(m["model"])
+        if m_clean == clean_name or m["model"] == model_name:
+            return {
+                "modelfile": "",
+                "parameters": "",
+                "template": "",
+                "details": {"format": "bedrock", "family": clean_name.split(".")[0] if "." in clean_name else "unknown"},
+                "model_info": {"general.architecture": "bedrock"}
+            }
+    raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
 
 @app.post("/api/generate")
 async def generate(request: Request):
     data = await request.json()
-    r = bedrock_runtime.converse(modelId=data.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0"), messages=[{"role": "user", "content": [{"text": data.get("prompt", "")}]}], inferenceConfig={"maxTokens": data.get("max_tokens", 2048), "temperature": data.get("temperature", 0.7)})
+    model = clean_model_name(data.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0"))
+    r = bedrock_runtime.converse(modelId=model, messages=[{"role": "user", "content": [{"text": data.get("prompt", "")}]}], inferenceConfig={"maxTokens": data.get("max_tokens", 2048), "temperature": data.get("temperature", 0.7)})
     text = "".join(c.get('text', '') for c in r.get('output', {}).get('message', {}).get('content', []))
-    return {"model": data.get("model"), "created_at": datetime.now().isoformat()+"Z", "response": text, "done": True}
+    return {"model": model, "created_at": datetime.now().isoformat()+"Z", "response": text, "done": True}
 
 @app.post("/api/chat")
 async def chat(request: Request):
     data = await request.json()
+    model = clean_model_name(data.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0"))
     msgs = [{"role": m.get("role", "user"), "content": [{"text": m.get("content", "")}]} for m in data.get("messages", [])]
-    r = bedrock_runtime.converse(modelId=data.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0"), messages=msgs, inferenceConfig={"maxTokens": data.get("max_tokens", 2048), "temperature": data.get("temperature", 0.7)})
+    r = bedrock_runtime.converse(modelId=model, messages=msgs, inferenceConfig={"maxTokens": data.get("max_tokens", 2048), "temperature": data.get("temperature", 0.7)})
     text = "".join(c.get('text', '') for c in r.get('output', {}).get('message', {}).get('content', []))
-    return {"model": data.get("model"), "created_at": datetime.now().isoformat()+"Z", "message": {"role": "assistant", "content": text}, "done": True}
+    usage = r.get("usage", {})
+    return {"model": model, "created_at": datetime.now().isoformat()+"Z", "message": {"role": "assistant", "content": text}, "done": True, "prompt_eval_count": usage.get("inputTokens", 0), "eval_count": usage.get("outputTokens", 0)}
+
+# OpenAI-compatible endpoints for pipelines forwarding
+@app.get("/v1/models")
+async def openai_list_models():
+    """OpenAI-compatible model list"""
+    models = get_models()
+    return {"object": "list", "data": [{"id": clean_model_name(m["model"]), "object": "model", "created": 0, "owned_by": "bedrock"} for m in models]}
+
+@app.post("/v1/chat/completions")
+async def openai_chat(request: Request):
+    """OpenAI-compatible chat completions endpoint"""
+    data = await request.json()
+    model = clean_model_name(data.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0"))
+    msgs = [{"role": m.get("role", "user"), "content": [{"text": m.get("content", "")}]} for m in data.get("messages", [])]
+    r = bedrock_runtime.converse(modelId=model, messages=msgs, inferenceConfig={"maxTokens": data.get("max_tokens", 2048), "temperature": data.get("temperature", 0.7)})
+    text = "".join(c.get('text', '') for c in r.get('output', {}).get('message', {}).get('content', []))
+    usage = r.get('usage', {})
+    return {
+        "id": f"chatcmpl-{datetime.now().timestamp()}",
+        "object": "chat.completion",
+        "created": int(datetime.now().timestamp()),
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": usage.get('inputTokens', 0), "completion_tokens": usage.get('outputTokens', 0), "total_tokens": usage.get('inputTokens', 0) + usage.get('outputTokens', 0)}
+    }
 
 if __name__ == "__main__":
     import uvicorn

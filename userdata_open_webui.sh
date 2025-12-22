@@ -29,38 +29,6 @@ log "5/12 Create app directory"
 mkdir -p /opt/open-webui/pipelines && cd /opt/open-webui
 
 log "6/12 Create pipeline filters"
-# Model name fix filter (strips :latest suffix for Bedrock compatibility)
-cat > pipelines/model_name_fix.py <<'PYEOF'
-"""
-title: Model Name Fix Filter
-description: Strips :latest suffix from model names for Bedrock Gateway compatibility
-"""
-from typing import List, Optional
-from pydantic import BaseModel
-
-class Pipeline:
-    class Valves(BaseModel):
-        pipelines: List[str] = ["*"]
-        priority: int = -1  # Run before all other filters
-
-    def __init__(self):
-        self.type = "filter"
-        self.name = "Model Name Fix"
-        self.valves = self.Valves()
-
-    async def on_startup(self):
-        pass
-
-    async def on_shutdown(self):
-        pass
-
-    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        if "model" in body and body["model"]:
-            # Strip :latest suffix that Open WebUI adds for Ollama compatibility
-            body["model"] = body["model"].replace(":latest", "")
-        return body
-PYEOF
-
 # Detoxify filter
 cat > pipelines/detoxify_filter.py <<'PYEOF'
 """
@@ -218,7 +186,7 @@ class Pipeline:
             host=self.valves.host,
             debug=self.valves.debug,
         )
-        self.langfuse.auth_check()
+        # Skip auth_check() - it can timeout and crash pipelines startup
 
     async def on_shutdown(self):
         if self.langfuse:
@@ -275,7 +243,9 @@ class Pipeline:
 PYEOF
 
 # OpenTelemetry Collector config for Langfuse integration
-cat > otel-collector-config.yaml <<'OTELEOF'
+# Compute base64 auth header for OTEL exporter
+LANGFUSE_AUTH_BASE64=$(echo -n '${langfuse_public_key}:${langfuse_secret_key}' | base64 -w0)
+cat > otel-collector-config.yaml <<OTELEOF
 receivers:
   otlp:
     protocols:
@@ -293,7 +263,7 @@ exporters:
   otlphttp:
     endpoint: ${langfuse_url}/api/public/otel
     headers:
-      Authorization: "Basic $(echo -n '${langfuse_public_key}:${langfuse_secret_key}' | base64)"
+      Authorization: "Basic $LANGFUSE_AUTH_BASE64"
 
 service:
   pipelines:
@@ -328,6 +298,9 @@ ENABLE_OAUTH_ROLE_MANAGEMENT=true
 OAUTH_ROLES_CLAIM=roles
 OAUTH_ALLOWED_ROLES=user,admin
 OAUTH_ADMIN_ROLES=admin
+ENABLE_OAUTH_GROUP_MANAGEMENT=true
+ENABLE_OAUTH_GROUP_CREATION=true
+OAUTH_GROUP_CLAIM=groups
 ENABLE_WEBSOCKET_SUPPORT=false
 EOF
 
@@ -359,6 +332,9 @@ services:
       - pipelines-data:/app/data
     environment:
       - PIPELINES_DIR=/app/pipelines
+      - LANGFUSE_SECRET_KEY=${langfuse_secret_key}
+      - LANGFUSE_PUBLIC_KEY=${langfuse_public_key}
+      - LANGFUSE_HOST=${langfuse_url}
 
   # OTEL Collector - bridges gRPC to HTTP for Langfuse
   otel-collector:
@@ -582,22 +558,28 @@ KC_TOKEN=$(curl -sf -X POST "${keycloak_url}/realms/master/protocol/openid-conne
 if [ -n "$KC_TOKEN" ] && [ "$KC_TOKEN" != "null" ]; then
   # Trigger LDAP sync to ensure users exist in Keycloak
   LDAP_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/components" \
-    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[]|select(.providerId=="ldap")|.id') || true
+    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[]|select(.providerId=="ldap")|.id' | head -1) || true
   [ -n "$LDAP_ID" ] && curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/user-storage/$LDAP_ID/sync?action=triggerFullSync" \
     -H "Authorization: Bearer $KC_TOKEN" || true
-  sleep 10
+  sleep 15
 
-  # Assign admin role to Admin user
-  ADMIN_USER_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/users?username=Admin" \
-    -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[0].id') || true
+  # Assign admin role to Admin user (retry up to 3 times)
   ADMIN_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/admin" \
     -H "Authorization: Bearer $KC_TOKEN") || true
 
-  if [ -n "$ADMIN_USER_ID" ] && [ "$ADMIN_USER_ID" != "null" ] && [ -n "$ADMIN_ROLE" ]; then
-    curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$ADMIN_USER_ID/role-mappings/realm" \
-      -H "Authorization: Bearer $KC_TOKEN" -H "Content-Type: application/json" \
-      -d "[$ADMIN_ROLE]" && log "✅ Admin role assigned to Admin user" || log "⚠️ Failed to assign admin role"
-  fi
+  for attempt in 1 2 3; do
+    ADMIN_USER_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/users?username=Admin" \
+      -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[0].id') || true
+
+    if [ -n "$ADMIN_USER_ID" ] && [ "$ADMIN_USER_ID" != "null" ] && [ -n "$ADMIN_ROLE" ]; then
+      curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$ADMIN_USER_ID/role-mappings/realm" \
+        -H "Authorization: Bearer $KC_TOKEN" -H "Content-Type: application/json" \
+        -d "[$ADMIN_ROLE]" && { log "✅ Admin role assigned to Admin user"; break; } || log "⚠️ Attempt $attempt: Failed to assign admin role"
+    else
+      log "⚠️ Attempt $attempt: Admin user not found in Keycloak yet, waiting..."
+    fi
+    sleep 10
+  done
 
   # Get user role for all other users
   USER_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/user" \
@@ -648,7 +630,103 @@ else
   log "⚠️ Could not get Keycloak token for role assignment"
 fi
 
-log "12/12 Done"
+log "12/12 Setting up Grafana metrics collection"
+# Only set up metrics if InfluxDB URL is configured
+if [ -n "${influxdb_url}" ]; then
+mkdir -p /opt/metrics
+cat > /opt/metrics/openwebui_metrics.sh << 'METRICSSCRIPT'
+#!/bin/bash
+# OpenWebUI Metrics Collector - sends usage data to InfluxDB with AD group filtering
+# Environment variables INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET are set by systemd
+
+DB_PATH="/tmp/webui.db"
+docker cp open-webui:/app/backend/data/webui.db "$DB_PATH" 2>/dev/null || exit 1
+
+python3 << 'PYTHON'
+import sqlite3, requests, json, os
+
+conn = sqlite3.connect("/tmp/webui.db")
+conn.row_factory = sqlite3.Row
+cursor = conn.cursor()
+
+# Build user -> group mapping
+user_groups = {}
+cursor.execute("""
+    SELECT u.id, u.email, u.name, g.name as group_name
+    FROM user u LEFT JOIN group_member gm ON u.id = gm.user_id
+    LEFT JOIN "group" g ON gm.group_id = g.id
+""")
+for row in cursor.fetchall():
+    user_groups[row['id']] = {'email': row['email'], 'name': row['name'], 'group': row['group_name'] or 'Unknown'}
+
+# Get recent chat messages with usage stats
+cursor.execute("SELECT id, user_id, chat, updated_at FROM chat WHERE updated_at > (strftime('%s', 'now') - 86400)")
+
+lines = []
+for chat in cursor.fetchall():
+    user_info = user_groups.get(chat['user_id'], {'email': 'unknown', 'group': 'Unknown'})
+    user_group = user_info['group'].replace(' ', '_')
+    user_email = user_info['email'].split('@')[0].replace('.', '_')
+
+    try:
+        chat_data = json.loads(chat['chat']) if chat['chat'] else {}
+        messages = chat_data.get('history', {}).get('messages', {})
+        for msg_id, msg in messages.items():
+            if isinstance(msg, dict) and 'usage' in msg:
+                usage = msg.get('usage', {})
+                model = str(msg.get('model', 'unknown')).replace(':', '_').replace(' ', '_')
+                prompt_tokens = usage.get('prompt_eval_count', usage.get('prompt_tokens', 0)) or 0
+                completion_tokens = usage.get('eval_count', usage.get('completion_tokens', 0)) or 0
+                if prompt_tokens > 0 or completion_tokens > 0:
+                    ts = msg.get('timestamp', chat['updated_at'])
+                    lines.append(f'chat_usage,user={user_email},user_group={user_group},model={model} prompt_tokens={prompt_tokens}i,completion_tokens={completion_tokens}i,total_tokens={prompt_tokens + completion_tokens}i {ts}')
+    except: pass
+
+conn.close()
+
+if lines:
+    resp = requests.post(
+        f"{os.environ.get('INFLUX_URL', 'http://localhost:8086')}/api/v2/write",
+        params={"org": os.environ.get('INFLUX_ORG', 'aiportal'), "bucket": os.environ.get('INFLUX_BUCKET', 'openwebui'), "precision": "s"},
+        headers={"Authorization": f"Token {os.environ.get('INFLUX_TOKEN', '')}", "Content-Type": "text/plain"},
+        data='\n'.join(lines)
+    )
+    print(f"Sent {len(lines)} metrics: {resp.status_code}")
+PYTHON
+METRICSSCRIPT
+chmod +x /opt/metrics/openwebui_metrics.sh
+
+# Create systemd timer to run every 5 minutes
+cat > /etc/systemd/system/openwebui-metrics.service << SVCEOF
+[Unit]
+Description=OpenWebUI Metrics Collector
+After=docker.service
+[Service]
+Type=oneshot
+Environment="INFLUX_URL=${influxdb_url}"
+Environment="INFLUX_TOKEN=${influxdb_token}"
+Environment="INFLUX_ORG=${influxdb_org}"
+Environment="INFLUX_BUCKET=${influxdb_bucket}"
+ExecStart=/opt/metrics/openwebui_metrics.sh
+SVCEOF
+
+cat > /etc/systemd/system/openwebui-metrics.timer << 'TIMEREOF'
+[Unit]
+Description=Run OpenWebUI metrics every 5 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+systemctl daemon-reload
+systemctl enable --now openwebui-metrics.timer
+log "Grafana Metrics: Enabled → InfluxDB (every 5 min, with AD group tags)"
+else
+log "Grafana Metrics: Disabled (influxdb_url not configured)"
+fi
+
 log "✅ COMPLETE - ${open_webui_url}"
 log "Pipelines: Detoxify, LLM-Guard, Turn Limit (${max_conversation_turns} turns)"
 log "OTEL Tracing: Enabled → Langfuse via OTEL Collector"

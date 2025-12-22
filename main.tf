@@ -76,6 +76,11 @@ resource "aws_s3_object" "open_webui_provision_script" {
     langfuse_public_key     = var.langfuse_public_key
     langfuse_secret_key     = var.langfuse_secret_key
     s3_bucket               = aws_s3_bucket.scripts.id
+    # Grafana metrics integration
+    influxdb_url            = var.influxdb_url
+    influxdb_token          = var.influxdb_token
+    influxdb_org            = var.influxdb_org
+    influxdb_bucket         = var.influxdb_bucket
   })
 
   tags = {
@@ -485,7 +490,11 @@ resource "aws_iam_role_policy" "bedrock_access" {
           "ds:AccessDSData",
           "ds-data:CreateUser",
           "ds-data:UpdateUser",
-          "ds-data:DescribeUser"
+          "ds-data:DescribeUser",
+          "ds-data:CreateGroup",
+          "ds-data:AddGroupMember",
+          "ds-data:ListGroups",
+          "ds-data:ListGroupMembers"
         ]
         Resource = "*"
       },
@@ -712,6 +721,7 @@ resource "aws_instance" "keycloak" {
     db_sslmode              = "require"
     ad_server               = join(",", aws_directory_service_directory.main.dns_ip_addresses)
     ad_base_dn              = "OU=Users,OU=corp,DC=corp,DC=aiportal,DC=local"
+    ad_domain_dn            = "DC=corp,DC=aiportal,DC=local"
     ad_bind_dn              = "Admin@corp.aiportal.local"
     ad_bind_password        = var.ad_admin_password
     keycloak_admin_user     = "admin"
@@ -720,6 +730,7 @@ resource "aws_instance" "keycloak" {
     domain_name             = var.domain_name
     openwebui_url           = "https://${var.subdomain}.${var.domain_name}"
     langfuse_url            = "https://${var.langfuse_subdomain}.${var.domain_name}"
+    grafana_url             = "https://${var.grafana_subdomain}.${var.domain_name}"
   })
 
   tags = {
@@ -740,7 +751,8 @@ resource "aws_acm_certificate" "ai_portal" {
   domain_name       = "${var.subdomain}.${var.domain_name}"
   subject_alternative_names = [
     "${var.keycloak_subdomain}.${var.domain_name}",
-    "${var.langfuse_subdomain}.${var.domain_name}"
+    "${var.langfuse_subdomain}.${var.domain_name}",
+    "${var.grafana_subdomain}.${var.domain_name}"
   ]
   validation_method = "DNS"
 

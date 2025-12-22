@@ -124,6 +124,12 @@ variable "langfuse_subdomain" {
   default     = "langfuse"
 }
 
+variable "grafana_subdomain" {
+  description = "Subdomain for Grafana"
+  type        = string
+  default     = "grafana"
+}
+
 variable "langfuse_instance_type" {
   description = "Instance type for Langfuse EC2"
   type        = string
@@ -140,4 +146,29 @@ variable "langfuse_secret_key" {
   description = "Langfuse project secret API key for Open WebUI integration"
   type        = string
   sensitive   = true
+}
+
+# Grafana Monitoring Integration (optional - set after monitoring stack is deployed)
+variable "influxdb_url" {
+  description = "InfluxDB URL for metrics collection (e.g., http://monitoring-ip:8086)"
+  type        = string
+  default     = ""
+}
+
+variable "influxdb_token" {
+  description = "InfluxDB API token for metrics collection"
+  type        = string
+  default     = ""
+}
+
+variable "influxdb_org" {
+  description = "InfluxDB organization name"
+  type        = string
+  default     = "aiportal"
+}
+
+variable "influxdb_bucket" {
+  description = "InfluxDB bucket for OpenWebUI metrics"
+  type        = string
+  default     = "openwebui"
 }
