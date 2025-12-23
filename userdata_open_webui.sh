@@ -138,107 +138,67 @@ class Pipeline:
         return body
 PYEOF
 
-# Langfuse v3 filter for token usage tracking
-cat > pipelines/langfuse_filter.py <<PYEOF
+# Langfuse v3 filter - uses start_span API (not trace which doesn't exist in SDK v3)
+cat > pipelines/langfuse_filter.py <<'PYEOF'
 """
-title: Langfuse Filter Pipeline for v3
-description: A filter pipeline that uses Langfuse v3 for LLM observability
+title: Langfuse Filter Pipeline
 requirements: langfuse>=3.0.0
 """
 from typing import List, Optional
 import os, uuid
 from pydantic import BaseModel
-from langfuse import Langfuse
-from utils.pipelines.main import get_last_assistant_message
-
-def get_last_assistant_message_obj(messages: List[dict]) -> dict:
-    for message in reversed(messages):
-        if message["role"] == "assistant":
-            return message
-    return {}
 
 class Pipeline:
     class Valves(BaseModel):
         pipelines: List[str] = ["*"]
         priority: int = 0
-        secret_key: str = ""
-        public_key: str = ""
-        host: str = ""
-        debug: bool = False
 
     def __init__(self):
         self.type = "filter"
         self.name = "Langfuse Filter"
-        self.valves = self.Valves(
-            secret_key=os.getenv("LANGFUSE_SECRET_KEY", "${langfuse_secret_key}"),
-            public_key=os.getenv("LANGFUSE_PUBLIC_KEY", "${langfuse_public_key}"),
-            host=os.getenv("LANGFUSE_HOST", "${langfuse_url}"),
-            debug=os.getenv("DEBUG_MODE", "false").lower() == "true",
-        )
+        self.valves = self.Valves()
         self.langfuse = None
-        self.chat_traces = {}
-        self.model_names = {}
 
     async def on_startup(self):
+        from langfuse import Langfuse
         self.langfuse = Langfuse(
-            secret_key=self.valves.secret_key,
-            public_key=self.valves.public_key,
-            host=self.valves.host,
-            debug=self.valves.debug,
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
+            host=os.getenv("LANGFUSE_HOST", ""),
         )
-        # Skip auth_check() - it can timeout and crash pipelines startup
 
     async def on_shutdown(self):
         if self.langfuse:
             self.langfuse.flush()
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        if not self.langfuse:
-            return body
-        metadata = body.get("metadata", {})
-        chat_id = metadata.get("chat_id", str(uuid.uuid4()))
-        if chat_id == "local":
-            chat_id = f"temp-{metadata.get('session_id')}"
-        metadata["chat_id"] = chat_id
-        body["metadata"] = metadata
-        model_id = body.get("model")
-        model_info = metadata.get("model", {})
-        self.model_names[chat_id] = {"id": model_id, "name": model_info.get("name", model_id) if isinstance(model_info, dict) else model_id}
-        user_email = user.get("email") if user else None
-        if chat_id not in self.chat_traces:
-            trace = self.langfuse.start_span(name=f"chat:{chat_id}", input=body, metadata={"user_id": user_email, "session_id": chat_id})
-            trace.update_trace(user_id=user_email, session_id=chat_id, tags=["open-webui"], input=body)
-            self.chat_traces[chat_id] = trace
-            event = trace.start_span(name=f"user_input:{uuid.uuid4()}", input=body["messages"])
-            event.end()
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         if not self.langfuse:
             return body
-        chat_id = body.get("chat_id")
-        if chat_id == "local":
-            chat_id = f"temp-{body.get('session_id')}"
-        if chat_id not in self.chat_traces:
-            return body
-        trace = self.chat_traces[chat_id]
-        assistant_message = get_last_assistant_message(body["messages"])
-        assistant_obj = get_last_assistant_message_obj(body["messages"])
-        usage = None
-        if assistant_obj:
-            info = assistant_obj.get("usage", {})
-            if isinstance(info, dict):
-                inp = info.get("prompt_eval_count") or info.get("prompt_tokens")
-                out = info.get("eval_count") or info.get("completion_tokens")
-                if inp and out:
-                    usage = {"input": inp, "output": out, "unit": "TOKENS"}
-        trace.update_trace(output=assistant_message)
-        model_id = self.model_names.get(chat_id, {}).get("id", body.get("model"))
-        gen = trace.start_generation(name=f"llm:{uuid.uuid4()}", model=model_id, input=body["messages"], output=assistant_message)
-        if usage:
-            gen.update(usage=usage)
-        gen.end()
-        self.langfuse.flush()
+        try:
+            messages = body.get("messages", [])
+            chat_id = body.get("chat_id") or body.get("metadata", {}).get("chat_id") or str(uuid.uuid4())
+            user_email = user.get("email", "unknown") if user else "unknown"
+            model = body.get("model", "unknown")
+
+            user_msgs = [m for m in messages if m.get("role") == "user"]
+            asst_msgs = [m for m in messages if m.get("role") == "assistant"]
+            last_user = user_msgs[-1].get("content", "") if user_msgs else ""
+            last_asst = asst_msgs[-1] if asst_msgs else {}
+            output = last_asst.get("content", "")
+
+            span = self.langfuse.start_span(name="chat", input=last_user, metadata={"user_id": user_email})
+            span.update_trace(user_id=user_email, session_id=chat_id, tags=["open-webui"], output=output)
+
+            gen = span.start_generation(name="llm", model=model, input=last_user, output=output)
+            gen.end()
+            span.end()
+
+            self.langfuse.flush()
+        except Exception:
+            pass
         return body
 PYEOF
 
