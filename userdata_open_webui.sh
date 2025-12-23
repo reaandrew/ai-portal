@@ -189,10 +189,19 @@ class Pipeline:
             last_asst = asst_msgs[-1] if asst_msgs else {}
             output = last_asst.get("content", "")
 
+            # Extract token usage from assistant message
+            usage = None
+            info = last_asst.get("usage", {})
+            if isinstance(info, dict):
+                inp = info.get("prompt_eval_count") or info.get("prompt_tokens") or 0
+                out = info.get("eval_count") or info.get("completion_tokens") or 0
+                if inp or out:
+                    usage = {"input": int(inp), "output": int(out), "unit": "TOKENS"}
+
             span = self.langfuse.start_span(name="chat", input=last_user, metadata={"user_id": user_email})
             span.update_trace(user_id=user_email, session_id=chat_id, tags=["open-webui"], output=output)
 
-            gen = span.start_generation(name="llm", model=model, input=last_user, output=output)
+            gen = span.start_generation(name="llm", model=model, input=last_user, output=output, usage=usage)
             gen.end()
             span.end()
 
