@@ -191,140 +191,92 @@ cat > /opt/monitoring/grafana-data/dashboards/openwebui-usage.json << 'DASHBOARD
     ]
   },
   "panels": [
-    {
-      "id": 1, "title": "", "type": "text",
-      "gridPos": {"h": 2, "w": 24, "x": 0, "y": 0},
-      "options": {"mode": "markdown", "content": "# AI Portal Usage Dashboard\n**Real-time analytics for Open WebUI usage across departments**"}
-    },
-    {
-      "id": 2, "title": "Total Chats", "type": "stat",
-      "gridPos": {"h": 3, "w": 4, "x": 0, "y": 2},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group()\n  |> count()\n  |> map(fn: (r) => ({_value: r._value, _field: \"count\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#6C5DD3", "value": null}]}, "displayName": "Chats"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 3, "title": "Total Tokens", "type": "stat",
-      "gridPos": {"h": 3, "w": 4, "x": 4, "y": 2},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group()\n  |> sum()\n  |> map(fn: (r) => ({_value: r._value, _field: \"tokens\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#22C55E", "value": null}]}, "displayName": "Tokens"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 4, "title": "Input Tokens", "type": "stat",
-      "gridPos": {"h": 3, "w": 4, "x": 8, "y": 2},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"prompt_tokens\")\n  |> group()\n  |> sum()\n  |> map(fn: (r) => ({_value: r._value, _field: \"input\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#3B82F6", "value": null}]}, "displayName": "Input"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 5, "title": "Output Tokens", "type": "stat",
-      "gridPos": {"h": 3, "w": 4, "x": 12, "y": 2},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"completion_tokens\")\n  |> group()\n  |> sum()\n  |> map(fn: (r) => ({_value: r._value, _field: \"output\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#F59E0B", "value": null}]}, "displayName": "Output"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 6, "title": "Unique Users", "type": "stat",
-      "gridPos": {"h": 3, "w": 4, "x": 16, "y": 2},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> distinct(column: \"user\")\n  |> count()\n  |> map(fn: (r) => ({_value: r._value, _field: \"users\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#EC4899", "value": null}]}, "displayName": "Users"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 7, "title": "Models Used", "type": "stat",
-      "gridPos": {"h": 3, "w": 4, "x": 20, "y": 2},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> distinct(column: \"model\")\n  |> count()\n  |> map(fn: (r) => ({_value: r._value, _field: \"models\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#8B5CF6", "value": null}]}, "displayName": "Models"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 10, "title": "Token Usage Over Time", "type": "barchart",
-      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 5},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [
-        {"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"prompt_tokens\")\n  |> aggregateWindow(every: 1h, fn: sum, createEmpty: false)\n  |> map(fn: (r) => ({_time: r._time, _value: r._value, _field: \"Input\"}))"},
-        {"refId": "B", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"completion_tokens\")\n  |> aggregateWindow(every: 1h, fn: sum, createEmpty: false)\n  |> map(fn: (r) => ({_time: r._time, _value: r._value, _field: \"Output\"}))"}
-      ],
-      "fieldConfig": {
-        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"fillOpacity": 80, "stacking": {"mode": "normal"}}},
-        "overrides": [
-          {"matcher": {"id": "byName", "options": "Input"}, "properties": [{"id": "color", "value": {"fixedColor": "#3B82F6", "mode": "fixed"}}]},
-          {"matcher": {"id": "byName", "options": "Output"}, "properties": [{"id": "color", "value": {"fixedColor": "#22C55E", "mode": "fixed"}}]}
-        ]
-      },
-      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "barWidth": 0.8, "stacking": "normal"}
-    },
-    {
-      "id": 11, "title": "Chats Per Hour", "type": "barchart",
-      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 5},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> aggregateWindow(every: 1h, fn: count, createEmpty: false)\n  |> map(fn: (r) => ({_time: r._time, _value: r._value, _field: \"Chats\"}))"}],
-      "fieldConfig": {"defaults": {"color": {"fixedColor": "#6C5DD3", "mode": "fixed"}, "custom": {"fillOpacity": 80}}},
-      "options": {"legend": {"displayMode": "hidden"}, "barWidth": 0.8}
-    },
-    {
-      "id": 12, "title": "Tokens by Department", "type": "barchart",
-      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 12},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"user_group\"])\n  |> sum()\n  |> map(fn: (r) => ({Department: r.user_group, Tokens: r._value}))"}],
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"fillOpacity": 80}}},
-      "options": {"legend": {"displayMode": "hidden"}, "xField": "Department", "barWidth": 0.6}
-    },
-    {
-      "id": 13, "title": "Tokens by Model", "type": "barchart",
-      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 12},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"model\"])\n  |> sum()\n  |> map(fn: (r) => ({Model: r.model, Tokens: r._value}))"}],
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"fillOpacity": 80}}},
-      "options": {"legend": {"displayMode": "hidden"}, "xField": "Model", "barWidth": 0.6}
-    },
-    {
-      "id": 14, "title": "Top Users", "type": "table",
-      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 12},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"user\", \"user_group\"])\n  |> sum()\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 10)\n  |> map(fn: (r) => ({User: r.user, Department: r.user_group, Tokens: r._value}))"}],
-      "fieldConfig": {"defaults": {"custom": {"align": "auto"}}, "overrides": [{"matcher": {"id": "byName", "options": "Tokens"}, "properties": [{"id": "unit", "value": "locale"}]}]},
-      "options": {"showHeader": true}
-    },
-    {
-      "id": 15, "title": "Chats by Department", "type": "piechart",
-      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 19},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"user_group\"])\n  |> count()\n  |> map(fn: (r) => ({_value: r._value, _field: r.user_group}))"}],
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
-      "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}, "pieType": "pie", "reduceOptions": {"calcs": ["lastNotNull"]}}
-    },
-    {
-      "id": 16, "title": "Chats by Model", "type": "piechart",
-      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 19},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"model\"])\n  |> count()\n  |> map(fn: (r) => ({_value: r._value, _field: r.model}))"}],
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
-      "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}, "pieType": "pie", "reduceOptions": {"calcs": ["lastNotNull"]}}
-    },
-    {
-      "id": 17, "title": "Avg Tokens/Chat", "type": "stat",
-      "gridPos": {"h": 7, "w": 4, "x": 16, "y": 19},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group()\n  |> mean()\n  |> map(fn: (r) => ({_value: r._value, _field: \"avg\"}))"}],
-      "fieldConfig": {"defaults": {"unit": "locale", "decimals": 0, "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#10B981", "value": null}]}, "displayName": "Avg/Chat"}},
-      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}
-    },
-    {
-      "id": 18, "title": "Output/Input Ratio", "type": "gauge",
-      "gridPos": {"h": 7, "w": 4, "x": 20, "y": 19},
-      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
-      "targets": [{"refId": "A", "query": "input = from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"prompt_tokens\")\n  |> group()\n  |> sum()\n  |> findRecord(fn: (key) => true, idx: 0)\n\noutput = from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"completion_tokens\")\n  |> group()\n  |> sum()\n  |> findRecord(fn: (key) => true, idx: 0)\n\narray.from(rows: [{_value: float(v: output._value) / float(v: input._value)}])"}],
-      "fieldConfig": {"defaults": {"unit": "none", "decimals": 1, "min": 0, "max": 10, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "#3B82F6", "value": null}, {"color": "#22C55E", "value": 2}, {"color": "#F59E0B", "value": 5}]}, "displayName": "Out/In"}},
-      "options": {"showThresholdLabels": false, "showThresholdMarkers": true}
-    }
+    {"id": 1, "title": "", "type": "text", "gridPos": {"h": 2, "w": 24, "x": 0, "y": 0},
+     "options": {"mode": "markdown", "content": "# AI Portal Usage Dashboard\n**Real-time analytics for Open WebUI usage across departments**"}},
+    {"id": 2, "title": "Total Chats", "type": "stat", "gridPos": {"h": 3, "w": 4, "x": 0, "y": 2},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group()\n  |> count()"}],
+     "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#6C5DD3", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 3, "title": "Total Tokens", "type": "stat", "gridPos": {"h": 3, "w": 4, "x": 4, "y": 2},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group()\n  |> sum()"}],
+     "fieldConfig": {"defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#22C55E", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 4, "title": "Input Tokens", "type": "stat", "gridPos": {"h": 3, "w": 4, "x": 8, "y": 2},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"prompt_tokens\")\n  |> group()\n  |> sum()"}],
+     "fieldConfig": {"defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#3B82F6", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 5, "title": "Output Tokens", "type": "stat", "gridPos": {"h": 3, "w": 4, "x": 12, "y": 2},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"completion_tokens\")\n  |> group()\n  |> sum()"}],
+     "fieldConfig": {"defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#F59E0B", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 6, "title": "Unique Users", "type": "stat", "gridPos": {"h": 3, "w": 4, "x": 16, "y": 2},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> distinct(column: \"user\")\n  |> count()"}],
+     "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#EC4899", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 7, "title": "Models Used", "type": "stat", "gridPos": {"h": 3, "w": 4, "x": 20, "y": 2},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> distinct(column: \"model\")\n  |> count()"}],
+     "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#8B5CF6", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 10, "title": "Token Usage Over Time", "type": "timeseries", "gridPos": {"h": 7, "w": 12, "x": 0, "y": 5},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [
+       {"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"prompt_tokens\")\n  |> aggregateWindow(every: v.windowPeriod, fn: sum, createEmpty: false)\n  |> set(key: \"_field\", value: \"Input\")"},
+       {"refId": "B", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"completion_tokens\")\n  |> aggregateWindow(every: v.windowPeriod, fn: sum, createEmpty: false)\n  |> set(key: \"_field\", value: \"Output\")"}
+     ],
+     "fieldConfig": {
+       "defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "stacking": {"mode": "normal"}}, "color": {"mode": "palette-classic"}},
+       "overrides": [
+         {"matcher": {"id": "byName", "options": "Input"}, "properties": [{"id": "color", "value": {"fixedColor": "#3B82F6", "mode": "fixed"}}]},
+         {"matcher": {"id": "byName", "options": "Output"}, "properties": [{"id": "color", "value": {"fixedColor": "#22C55E", "mode": "fixed"}}]}
+       ]
+     },
+     "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}},
+    {"id": 11, "title": "Chats Over Time", "type": "timeseries", "gridPos": {"h": 7, "w": 12, "x": 12, "y": 5},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> aggregateWindow(every: v.windowPeriod, fn: count, createEmpty: false)\n  |> set(key: \"_field\", value: \"Chats\")"}],
+     "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80}, "color": {"fixedColor": "#6C5DD3", "mode": "fixed"}}},
+     "options": {"legend": {"displayMode": "hidden"}}},
+    {"id": 12, "title": "Tokens by Department", "type": "piechart", "gridPos": {"h": 7, "w": 8, "x": 0, "y": 12},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"user_group\"])\n  |> sum()\n  |> group()\n  |> keep(columns: [\"user_group\", \"_value\"])\n  |> rename(columns: {user_group: \"_field\"})"}],
+     "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "locale"}},
+     "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}, "pieType": "donut", "reduceOptions": {"calcs": ["lastNotNull"]}}},
+    {"id": 13, "title": "Tokens by Model", "type": "piechart", "gridPos": {"h": 7, "w": 8, "x": 8, "y": 12},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"model\"])\n  |> sum()\n  |> group()\n  |> keep(columns: [\"model\", \"_value\"])\n  |> rename(columns: {model: \"_field\"})"}],
+     "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "locale"}},
+     "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}, "pieType": "donut", "reduceOptions": {"calcs": ["lastNotNull"]}}},
+    {"id": 14, "title": "Top Users", "type": "table", "gridPos": {"h": 7, "w": 8, "x": 16, "y": 12},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"user\", \"user_group\"])\n  |> sum()\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 10)\n  |> keep(columns: [\"user\", \"user_group\", \"_value\"])\n  |> rename(columns: {user: \"User\", user_group: \"Department\", _value: \"Tokens\"})"}],
+     "fieldConfig": {"defaults": {"custom": {"align": "auto"}}, "overrides": [{"matcher": {"id": "byName", "options": "Tokens"}, "properties": [{"id": "unit", "value": "locale"}]}]},
+     "options": {"showHeader": true}},
+    {"id": 15, "title": "Chats by Department", "type": "piechart", "gridPos": {"h": 7, "w": 8, "x": 0, "y": 19},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"user_group\"])\n  |> count()\n  |> group()\n  |> keep(columns: [\"user_group\", \"_value\"])\n  |> rename(columns: {user_group: \"_field\"})"}],
+     "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
+     "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}, "pieType": "pie", "reduceOptions": {"calcs": ["lastNotNull"]}}},
+    {"id": 16, "title": "Chats by Model", "type": "piechart", "gridPos": {"h": 7, "w": 8, "x": 8, "y": 19},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group(columns: [\"model\"])\n  |> count()\n  |> group()\n  |> keep(columns: [\"model\", \"_value\"])\n  |> rename(columns: {model: \"_field\"})"}],
+     "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}},
+     "options": {"legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}, "pieType": "pie", "reduceOptions": {"calcs": ["lastNotNull"]}}},
+    {"id": 17, "title": "Avg Tokens/Chat", "type": "stat", "gridPos": {"h": 7, "w": 4, "x": 16, "y": 19},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"total_tokens\")\n  |> group()\n  |> mean()"}],
+     "fieldConfig": {"defaults": {"unit": "locale", "decimals": 0, "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "#10B981", "value": null}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}},
+    {"id": 18, "title": "Output/Input Ratio", "type": "stat", "gridPos": {"h": 7, "w": 4, "x": 20, "y": 19},
+     "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+     "targets": [{"refId": "A", "query": "import \"array\"\n\ninput = from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"prompt_tokens\")\n  |> group()\n  |> sum()\n  |> findRecord(fn: (key) => true, idx: 0)\n\noutput = from(bucket: \"openwebui\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"chat_usage\")\n  |> filter(fn: (r) => r.user_group =~ /${group}/)\n  |> filter(fn: (r) => r.model =~ /${model}/)\n  |> filter(fn: (r) => r._field == \"completion_tokens\")\n  |> group()\n  |> sum()\n  |> findRecord(fn: (key) => true, idx: 0)\n\narray.from(rows: [{_value: if input._value > 0 then float(v: output._value) / float(v: input._value) else 0.0}])"}],
+     "fieldConfig": {"defaults": {"unit": "none", "decimals": 1, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "#3B82F6", "value": null}, {"color": "#22C55E", "value": 2}, {"color": "#F59E0B", "value": 5}]}}},
+     "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value"}}
   ],
   "time": {"from": "now-7d", "to": "now"}
 }
