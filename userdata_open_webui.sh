@@ -610,23 +610,39 @@ if [ -n "$KC_TOKEN" ] && [ "$KC_TOKEN" != "null" ]; then
     -H "Authorization: Bearer $KC_TOKEN" || true
   sleep 15
 
-  # Assign admin role to Admin user (retry up to 3 times)
+  # Assign admin role to Admin user (retry up to 10 times with longer waits)
   ADMIN_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/admin" \
     -H "Authorization: Bearer $KC_TOKEN") || true
 
-  for attempt in 1 2 3; do
+  ADMIN_ROLE_ASSIGNED=false
+  for attempt in {1..10}; do
+    # Trigger LDAP sync on each attempt to ensure user is present
+    [ -n "$LDAP_ID" ] && curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/user-storage/$LDAP_ID/sync?action=triggerFullSync" \
+      -H "Authorization: Bearer $KC_TOKEN" >/dev/null 2>&1 || true
+    sleep 5
+
     ADMIN_USER_ID=$(curl -sf "${keycloak_url}/admin/realms/aiportal/users?username=Admin" \
       -H "Authorization: Bearer $KC_TOKEN" | jq -r '.[0].id') || true
 
     if [ -n "$ADMIN_USER_ID" ] && [ "$ADMIN_USER_ID" != "null" ] && [ -n "$ADMIN_ROLE" ]; then
-      curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$ADMIN_USER_ID/role-mappings/realm" \
+      if curl -sf -X POST "${keycloak_url}/admin/realms/aiportal/users/$ADMIN_USER_ID/role-mappings/realm" \
         -H "Authorization: Bearer $KC_TOKEN" -H "Content-Type: application/json" \
-        -d "[$ADMIN_ROLE]" && { log "✅ Admin role assigned to Admin user"; break; } || log "⚠️ Attempt $attempt: Failed to assign admin role"
+        -d "[$ADMIN_ROLE]"; then
+        log "✅ Admin role assigned to Admin user in Keycloak (attempt $attempt)"
+        ADMIN_ROLE_ASSIGNED=true
+        break
+      else
+        log "⚠️ Attempt $attempt: Failed to assign admin role via API"
+      fi
     else
-      log "⚠️ Attempt $attempt: Admin user not found in Keycloak yet, waiting..."
+      log "⚠️ Attempt $attempt: Admin user not found in Keycloak yet (LDAP sync pending), waiting..."
     fi
-    sleep 10
+    sleep 15
   done
+
+  if [ "$ADMIN_ROLE_ASSIGNED" = false ]; then
+    log "❌ WARNING: Could not assign admin role in Keycloak after 10 attempts"
+  fi
 
   # Get user role for all other users
   USER_ROLE=$(curl -sf "${keycloak_url}/admin/realms/aiportal/roles/user" \
@@ -774,8 +790,71 @@ else
 log "Grafana Metrics: Disabled (influxdb_url not configured)"
 fi
 
+log "FINAL FAILSAFE: Forcing Admin role in database"
+# This is the NUCLEAR option - force admin role regardless of OAuth or anything else
+for i in {1..5}; do
+  docker exec -i open-webui python3 <<'PYEOF' && break || sleep 10
+import os,time
+os.environ['DATA_DIR']='/app/backend/data'
+for i in range(30):
+    try:
+        from open_webui.internal.db import engine
+        from sqlalchemy import text
+        break
+    except: time.sleep(2)
+with engine.connect() as c:
+    # Force admin role for Admin user (case-insensitive email match)
+    result = c.execute(text("UPDATE user SET role='admin' WHERE LOWER(email) LIKE '%admin%'"))
+    c.commit()
+    # Verify
+    r = c.execute(text("SELECT email, role FROM user WHERE LOWER(email) LIKE '%admin%'"))
+    for row in r:
+        print(f"VERIFIED: {row[0]} has role={row[1]}")
+PYEOF
+done
+
+# Create startup script that ensures admin role on every boot
+cat > /opt/open-webui/ensure_admin.sh <<'ADMINSCRIPT'
+#!/bin/bash
+# Ensure Admin user has admin role - runs on every boot
+sleep 30  # Wait for containers to be ready
+docker exec -i open-webui python3 <<'PYEOF'
+import os,time
+os.environ['DATA_DIR']='/app/backend/data'
+for i in range(30):
+    try:
+        from open_webui.internal.db import engine
+        from sqlalchemy import text
+        break
+    except: time.sleep(2)
+with engine.connect() as c:
+    c.execute(text("UPDATE user SET role='admin' WHERE LOWER(email) LIKE '%admin%'"))
+    c.commit()
+    print("Admin role enforced")
+PYEOF
+ADMINSCRIPT
+chmod +x /opt/open-webui/ensure_admin.sh
+
+# Create systemd service to run on boot
+cat > /etc/systemd/system/ensure-admin.service <<EOF
+[Unit]
+Description=Ensure Admin user has admin role
+After=docker.service open-webui.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/open-webui/ensure_admin.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable ensure-admin.service
+
 log "✅ COMPLETE - ${open_webui_url}"
-log "Pipelines: Detoxify, LLM-Guard, Turn Limit (${max_conversation_turns} turns)"
+log "Pipelines: Detoxify, LLM-Guard, PII Detection, Turn Limit (${max_conversation_turns} turns)"
 log "OTEL Tracing: Enabled → Langfuse via OTEL Collector"
-log "Admin: Admin / (AD password)"
+log "Admin: Admin / (AD password) - ROLE ENFORCED"
 log "Users: firstname.surname / TestOpenWebUI123@ (see /tmp/ad_users.yaml)"
