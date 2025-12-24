@@ -107,7 +107,7 @@ PYEOF
 cat > pipelines/pii_filter.py <<'PYEOF'
 """
 title: PII Detection Filter
-description: Detect and block personal identifiable information (PII)
+description: Detect and block personal identifiable information (PII) using ML-based detection
 requirements: llm-guard
 """
 from typing import List, Optional
@@ -117,39 +117,23 @@ class Pipeline:
     class Valves(BaseModel):
         pipelines: List[str] = ["*"]
         priority: int = 1
-        detect_email: bool = True
-        detect_phone: bool = True
-        detect_ssn: bool = True
-        detect_credit_card: bool = True
-        detect_ip_address: bool = False
+        threshold: float = 0.5
 
     def __init__(self):
         self.type = "filter"
         self.name = "PII Detection Filter"
         self.valves = self.Valves()
         self.scanner = None
+        self.vault = None
 
     async def on_startup(self):
+        from llm_guard.vault import Vault
         from llm_guard.input_scanners import Anonymize
-        from llm_guard.input_scanners.anonymize_helpers import BERT_LARGE_NER_CONF
 
-        # Configure which PII types to detect
-        hidden_names = []
-        if not self.valves.detect_email:
-            hidden_names.append("EMAIL_ADDRESS")
-        if not self.valves.detect_phone:
-            hidden_names.append("PHONE_NUMBER")
-        if not self.valves.detect_ssn:
-            hidden_names.append("US_SSN")
-        if not self.valves.detect_credit_card:
-            hidden_names.append("CREDIT_CARD")
-        if not self.valves.detect_ip_address:
-            hidden_names.append("IP_ADDRESS")
-
+        self.vault = Vault()
         self.scanner = Anonymize(
-            recognizer_conf=BERT_LARGE_NER_CONF,
-            hidden_names=hidden_names,
-            threshold=0.5
+            vault=self.vault,
+            threshold=self.valves.threshold
         )
 
     async def on_shutdown(self):
@@ -160,20 +144,22 @@ class Pipeline:
         sanitized, is_valid, risk = self.scanner.scan(msg)
 
         if not is_valid:
-            # Determine which PII types were detected
+            # Determine what was detected by looking at replacements in sanitized text
             detected = []
-            if "[EMAIL_ADDRESS]" in sanitized:
-                detected.append("email")
-            if "[PHONE_NUMBER]" in sanitized:
+            if "[EMAIL_ADDRESS" in sanitized:
+                detected.append("email address")
+            if "[PHONE_NUMBER" in sanitized:
                 detected.append("phone number")
-            if "[US_SSN]" in sanitized:
+            if "[US_SSN" in sanitized:
                 detected.append("SSN")
-            if "[CREDIT_CARD]" in sanitized:
+            if "[CREDIT_CARD" in sanitized:
                 detected.append("credit card")
-            if "[IP_ADDRESS]" in sanitized:
-                detected.append("IP address")
-            if "[PERSON]" in sanitized:
+            if "[PERSON" in sanitized:
                 detected.append("person name")
+            if "[IP_ADDRESS" in sanitized:
+                detected.append("IP address")
+            if "[LOCATION" in sanitized:
+                detected.append("location")
 
             pii_types = ", ".join(detected) if detected else "personal information"
             raise Exception(f"PII detected: {pii_types}. Please remove personal data before sending.")
