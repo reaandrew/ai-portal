@@ -425,9 +425,13 @@ for i in {1..30}; do curl -sf http://localhost:9099/ >/dev/null 2>&1 && break; s
 for i in {1..60}; do curl -sf http://${bedrock_gateway}:8000/health >/dev/null 2>&1 && break; sleep 5; log "Gateway... $((i*5))s"; done
 
 log "10/12 Sync models & setup AD"
-sleep 10
-docker exec -i open-webui python3 <<'PYEOF' || log "⚠️ Model sync failed"
-import os,requests,json,time
+# Retry model sync up to 10 times
+MODELS_SYNCED=false
+for attempt in {1..10}; do
+  log "Model sync attempt $attempt/10..."
+  sleep 10
+  if docker exec -i open-webui python3 <<'PYEOF'
+import os,requests,json,time,sys
 from datetime import datetime
 os.environ['DATA_DIR']='/app/backend/data'
 for i in range(30):
@@ -436,16 +440,35 @@ for i in range(30):
         from sqlalchemy import text
         break
     except: time.sleep(2)
-r=requests.get('http://${bedrock_gateway}:8000/api/tags',timeout=10)
-models=r.json()['models']
-with engine.connect() as c:
-    c.execute(text('DELETE FROM model'))
-    for m in models:
-        ts=int(datetime.now().timestamp())
-        c.execute(text("INSERT INTO model (id,user_id,base_model_id,name,params,meta,created_at,updated_at,is_active,access_control) VALUES (:id,'',:bid,:n,'{}','{}',:ts,:ts,1,NULL)"),{'id':m['model'],'bid':m['model'],'n':m['name'],'ts':ts})
-    c.commit()
-print(f'Synced {len(models)} models')
+try:
+    r=requests.get('http://${bedrock_gateway}:8000/api/tags',timeout=30)
+    models=r.json()['models']
+    if len(models) == 0:
+        print("No models returned from gateway")
+        sys.exit(1)
+    with engine.connect() as c:
+        c.execute(text('DELETE FROM model'))
+        for m in models:
+            ts=int(datetime.now().timestamp())
+            c.execute(text("INSERT INTO model (id,user_id,base_model_id,name,params,meta,created_at,updated_at,is_active,access_control) VALUES (:id,'',:bid,:n,'{}','{}',:ts,:ts,1,NULL)"),{'id':m['model'],'bid':m['model'],'n':m['name'],'ts':ts})
+        c.commit()
+    print(f'Synced {len(models)} models')
+except Exception as e:
+    print(f"Error: {e}")
+    sys.exit(1)
 PYEOF
+  then
+    log "✅ Models synced successfully"
+    MODELS_SYNCED=true
+    break
+  else
+    log "⚠️ Model sync attempt $attempt failed, retrying..."
+  fi
+done
+
+if [ "$MODELS_SYNCED" = false ]; then
+  log "❌ WARNING: Model sync failed after 10 attempts"
+fi
 
 log "11/12 Setup AD users from YAML config"
 aws ds enable-directory-data-access --directory-id "${ad_directory_id}" --region ${aws_region} 2>&1 || true
@@ -790,7 +813,40 @@ else
 log "Grafana Metrics: Disabled (influxdb_url not configured)"
 fi
 
-log "FINAL FAILSAFE: Forcing Admin role in database"
+log "FINAL FAILSAFE: Sync models and force Admin role"
+
+# Final model sync failsafe
+log "Final model sync check..."
+docker exec -i open-webui python3 <<'PYEOF' || log "⚠️ Final model sync check failed"
+import os,requests,time
+from datetime import datetime
+os.environ['DATA_DIR']='/app/backend/data'
+for i in range(30):
+    try:
+        from open_webui.internal.db import engine
+        from sqlalchemy import text
+        break
+    except: time.sleep(2)
+with engine.connect() as c:
+    r = c.execute(text("SELECT COUNT(*) FROM model"))
+    count = r.fetchone()[0]
+    if count == 0:
+        print("No models in DB, syncing now...")
+        try:
+            r=requests.get('http://${bedrock_gateway}:8000/api/tags',timeout=30)
+            models=r.json()['models']
+            for m in models:
+                ts=int(datetime.now().timestamp())
+                c.execute(text("INSERT INTO model (id,user_id,base_model_id,name,params,meta,created_at,updated_at,is_active,access_control) VALUES (:id,'',:bid,:n,'{}','{}',:ts,:ts,1,NULL)"),{'id':m['model'],'bid':m['model'],'n':m['name'],'ts':ts})
+            c.commit()
+            print(f"Final sync: {len(models)} models")
+        except Exception as e:
+            print(f"Final sync error: {e}")
+    else:
+        print(f"Models already present: {count}")
+PYEOF
+
+log "Forcing Admin role in database"
 # This is the NUCLEAR option - force admin role regardless of OAuth or anything else
 for i in {1..5}; do
   docker exec -i open-webui python3 <<'PYEOF' && break || sleep 10
@@ -813,12 +869,56 @@ with engine.connect() as c:
 PYEOF
 done
 
-# Create startup script that ensures admin role on every boot
-cat > /opt/open-webui/ensure_admin.sh <<'ADMINSCRIPT'
+# Create startup script that ensures admin role AND syncs models on every boot
+cat > /opt/open-webui/ensure_setup.sh <<'SETUPSCRIPT'
 #!/bin/bash
-# Ensure Admin user has admin role - runs on every boot
-sleep 30  # Wait for containers to be ready
-docker exec -i open-webui python3 <<'PYEOF'
+# Ensure Admin role and models are present - runs on every boot
+BEDROCK_GW="${bedrock_gateway}"
+LOG="/var/log/ensure_setup.log"
+
+echo "$(date) Starting ensure_setup" >> $LOG
+
+# Wait for containers
+for i in {1..60}; do
+  docker ps | grep -q open-webui && break
+  sleep 5
+done
+sleep 30
+
+# Sync models if missing
+echo "$(date) Checking models..." >> $LOG
+docker exec -i open-webui python3 <<PYEOF >> $LOG 2>&1
+import os,requests,time
+from datetime import datetime
+os.environ['DATA_DIR']='/app/backend/data'
+for i in range(30):
+    try:
+        from open_webui.internal.db import engine
+        from sqlalchemy import text
+        break
+    except: time.sleep(2)
+with engine.connect() as c:
+    r = c.execute(text("SELECT COUNT(*) FROM model"))
+    count = r.fetchone()[0]
+    if count == 0:
+        print("No models, syncing...")
+        try:
+            r=requests.get('http://$BEDROCK_GW:8000/api/tags',timeout=30)
+            models=r.json()['models']
+            for m in models:
+                ts=int(datetime.now().timestamp())
+                c.execute(text("INSERT INTO model (id,user_id,base_model_id,name,params,meta,created_at,updated_at,is_active,access_control) VALUES (:id,'',:bid,:n,'{}','{}',:ts,:ts,1,NULL)"),{'id':m['model'],'bid':m['model'],'n':m['name'],'ts':ts})
+            c.commit()
+            print(f"Synced {len(models)} models")
+        except Exception as e:
+            print(f"Error: {e}")
+    else:
+        print(f"Models OK: {count}")
+PYEOF
+
+# Enforce admin role
+echo "$(date) Enforcing admin role..." >> $LOG
+docker exec -i open-webui python3 <<'PYEOF' >> $LOG 2>&1
 import os,time
 os.environ['DATA_DIR']='/app/backend/data'
 for i in range(30):
@@ -832,26 +932,28 @@ with engine.connect() as c:
     c.commit()
     print("Admin role enforced")
 PYEOF
-ADMINSCRIPT
-chmod +x /opt/open-webui/ensure_admin.sh
+
+echo "$(date) ensure_setup complete" >> $LOG
+SETUPSCRIPT
+chmod +x /opt/open-webui/ensure_setup.sh
 
 # Create systemd service to run on boot
-cat > /etc/systemd/system/ensure-admin.service <<EOF
+cat > /etc/systemd/system/ensure-setup.service <<EOF
 [Unit]
-Description=Ensure Admin user has admin role
+Description=Ensure Open WebUI setup (admin role + models)
 After=docker.service open-webui.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/opt/open-webui/ensure_admin.sh
+ExecStart=/opt/open-webui/ensure_setup.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable ensure-admin.service
+systemctl enable ensure-setup.service
 
 log "✅ COMPLETE - ${open_webui_url}"
 log "Pipelines: Detoxify, LLM-Guard, PII Detection, Turn Limit (${max_conversation_turns} turns)"
