@@ -103,6 +103,84 @@ class Pipeline:
         return body
 PYEOF
 
+# PII detection filter using llm-guard Anonymize scanner
+cat > pipelines/pii_filter.py <<'PYEOF'
+"""
+title: PII Detection Filter
+description: Detect and block personal identifiable information (PII)
+requirements: llm-guard
+"""
+from typing import List, Optional
+from pydantic import BaseModel
+
+class Pipeline:
+    class Valves(BaseModel):
+        pipelines: List[str] = ["*"]
+        priority: int = 1
+        detect_email: bool = True
+        detect_phone: bool = True
+        detect_ssn: bool = True
+        detect_credit_card: bool = True
+        detect_ip_address: bool = False
+
+    def __init__(self):
+        self.type = "filter"
+        self.name = "PII Detection Filter"
+        self.valves = self.Valves()
+        self.scanner = None
+
+    async def on_startup(self):
+        from llm_guard.input_scanners import Anonymize
+        from llm_guard.input_scanners.anonymize_helpers import BERT_LARGE_NER_CONF
+
+        # Configure which PII types to detect
+        hidden_names = []
+        if not self.valves.detect_email:
+            hidden_names.append("EMAIL_ADDRESS")
+        if not self.valves.detect_phone:
+            hidden_names.append("PHONE_NUMBER")
+        if not self.valves.detect_ssn:
+            hidden_names.append("US_SSN")
+        if not self.valves.detect_credit_card:
+            hidden_names.append("CREDIT_CARD")
+        if not self.valves.detect_ip_address:
+            hidden_names.append("IP_ADDRESS")
+
+        self.scanner = Anonymize(
+            recognizer_conf=BERT_LARGE_NER_CONF,
+            hidden_names=hidden_names,
+            threshold=0.5
+        )
+
+    async def on_shutdown(self):
+        pass
+
+    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        msg = body["messages"][-1]["content"]
+        sanitized, is_valid, risk = self.scanner.scan(msg)
+
+        if not is_valid:
+            # Determine which PII types were detected
+            detected = []
+            if "[EMAIL_ADDRESS]" in sanitized:
+                detected.append("email")
+            if "[PHONE_NUMBER]" in sanitized:
+                detected.append("phone number")
+            if "[US_SSN]" in sanitized:
+                detected.append("SSN")
+            if "[CREDIT_CARD]" in sanitized:
+                detected.append("credit card")
+            if "[IP_ADDRESS]" in sanitized:
+                detected.append("IP address")
+            if "[PERSON]" in sanitized:
+                detected.append("person name")
+
+            pii_types = ", ".join(detected) if detected else "personal information"
+            raise Exception(f"PII detected: {pii_types}. Please remove personal data before sending.")
+
+        return body
+PYEOF
+
 # Conversation turn limit filter
 cat > pipelines/turn_limit_filter.py <<'PYEOF'
 """
