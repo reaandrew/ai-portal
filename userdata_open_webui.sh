@@ -265,13 +265,16 @@ class Pipeline:
             span = self.langfuse.start_span(name="chat", input=last_user, metadata={"user_id": user_email})
             span.update_trace(user_id=user_email, session_id=chat_id, tags=["open-webui"], output=output)
 
-            gen = span.start_generation(name="llm", model=model, input=last_user, output=output, usage=usage)
+            gen = span.start_generation(name="llm", model=model, input=last_user, output=output)
+            if usage:
+                gen.update(usage=usage)
             gen.end()
             span.end()
 
             self.langfuse.flush()
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f"Langfuse filter error: {e}", file=sys.stderr)
         return body
 PYEOF
 
@@ -784,17 +787,17 @@ SVCEOF
 
 cat > /etc/systemd/system/openwebui-metrics.timer << 'TIMEREOF'
 [Unit]
-Description=Run OpenWebUI metrics every 5 minutes
+Description=Run OpenWebUI metrics every minute
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnBootSec=30sec
+OnUnitActiveSec=1min
 [Install]
 WantedBy=timers.target
 TIMEREOF
 
 systemctl daemon-reload
 systemctl enable --now openwebui-metrics.timer
-log "Grafana Metrics: Enabled → InfluxDB (every 5 min, with AD group tags)"
+log "Grafana Metrics: Enabled → InfluxDB (every 1 min, with AD group tags)"
 else
 log "Grafana Metrics: Disabled (influxdb_url not configured)"
 fi
